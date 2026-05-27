@@ -1,7 +1,8 @@
 import math
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-
+from dotenv import load_dotenv
 import CoolProp.CoolProp as CP
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,15 +33,21 @@ app.add_middleware(
 # MONGODB
 # =========================================================
 
-MONGO_DETAILS = "mongodb://localhost:27017"
+# MONGO_DETAILS = "mongodb://localhost:27017"
 
+# client = AsyncIOMotorClient(MONGO_DETAILS)
+
+# database = client.thermoCPF
+
+# metrics_collection = database.get_collection(
+#     "compressor_data_v2"
+# )
+
+load_dotenv()
+MONGO_DETAILS = os.getenv("MONGO_DETAILS")
 client = AsyncIOMotorClient(MONGO_DETAILS)
-
 database = client.thermoCPF
-
-metrics_collection = database.get_collection(
-    "compressor_data_v2"
-)
+metrics_collection = database.get_collection("compressor_data_v2")
 
 # =========================================================
 # DATA MODEL
