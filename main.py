@@ -504,7 +504,7 @@ def diagnose_compressor(data: CompressorDataInput):
 
         if superheat is not None:
 
-            if 2 <= superheat <= 20:
+            if 2 <= superheat <= 15:
                 sensor_status = "Normal"
 
             else:
