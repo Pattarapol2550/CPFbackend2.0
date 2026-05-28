@@ -33,21 +33,21 @@ app.add_middleware(
 # MONGODB
 # =========================================================
 
-# MONGO_DETAILS = "mongodb://localhost:27017"
+MONGO_DETAILS = "mongodb://localhost:27017"
 
-# client = AsyncIOMotorClient(MONGO_DETAILS)
-
-# database = client.thermoCPF
-
-# metrics_collection = database.get_collection(
-#     "compressor_data_v2"
-# )
-
-load_dotenv()
-MONGO_DETAILS = os.getenv("MONGO_DETAILS")
 client = AsyncIOMotorClient(MONGO_DETAILS)
+
 database = client.thermoCPF
-metrics_collection = database.get_collection("compressor_data_v2")
+
+metrics_collection = database.get_collection(
+    "compressor_data_v2"
+)
+
+# load_dotenv()
+# MONGO_DETAILS = os.getenv("MONGO_DETAILS")
+# client = AsyncIOMotorClient(MONGO_DETAILS)
+# database = client.thermoCPF
+# metrics_collection = database.get_collection("compressor_data_v2")
 
 # =========================================================
 # DATA MODEL
@@ -628,15 +628,24 @@ async def save_data(payload: CompressorDataInput):
 
 async def get_dashboard_data(
     compressor_id: str,
-    limit: int = 200
+    limit: int = 2000,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None
 ):
 
-    cursor = metrics_collection.find({
+    query: dict = {"compressor_id": compressor_id}
 
-        "compressor_id":
-            compressor_id
+    tz_th = timezone(timedelta(hours=7))
 
-    }).sort(
+    if start or end:
+        ts_filter = {}
+        if start:
+            ts_filter["$gte"] = start.astimezone(tz_th)
+        if end:
+            ts_filter["$lte"] = end.astimezone(tz_th)
+        query["timestamp"] = ts_filter
+
+    cursor = metrics_collection.find(query).sort(
 
         "timestamp",
         -1
