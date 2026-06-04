@@ -9,19 +9,19 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
-
+ 
 # =========================================================
 # FASTAPI
 # =========================================================
-
+ 
 app = FastAPI(
     title="Ammonia Diagnostics API v2"
 )
-
+ 
 # =========================================================
 # CORS
 # =========================================================
-
+ 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,164 +29,164 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+ 
 # =========================================================
 # MONGODB
 # =========================================================
-
+ 
 # MONGO_DETAILS = "mongodb://localhost:27017"
-
+ 
 # client = AsyncIOMotorClient(MONGO_DETAILS)
-
+ 
 # database = client.thermoCPF
-
+ 
 # metrics_collection = database.get_collection(
 #     "compressor_data_v2"
 # )
-
+ 
 load_dotenv()
 MONGO_DETAILS = os.getenv("MONGO_DETAILS")
 client = AsyncIOMotorClient(MONGO_DETAILS)
 database = client.thermoCPF
 metrics_collection = database.get_collection("compressor_data_v2")
-
+ 
 # =========================================================
 # DATA MODEL
 # =========================================================
-
+ 
 class CompressorDataInput(BaseModel):
-
+ 
     compressor_id: str
-
+ 
     timestamp: Optional[datetime] = None
-
+ 
     # =====================================================
     # OPTIONAL INPUTS
     # =====================================================
-
+ 
     sp_kg: float
     st_c:  float
     dp_kg: float
     dt_c:  float
-
+ 
     liquid_temp_c: Optional[float] = None
-
+ 
     mass_flow_kg_s: Optional[float] = None
-
+ 
     current_amp: Optional[float] = None
-
+ 
     fan_pump_kw: Optional[float] = None
-
+ 
     evaporator_room_temp_c: Optional[float] = None
-
+ 
     condenser_temp_c: Optional[float] = None
-
+ 
 # =========================================================
 # SAFE ROUND
 # =========================================================
-
+ 
 def safe_round(value, digit=2):
-
+ 
     if value is None:
         return "--"
-
+ 
     try:
         return round(value, digit)
-
+ 
     except:
         return "--"
-
+ 
 # =========================================================
 # MAIN DIAGNOSTIC
 # =========================================================
-
+ 
 def diagnose_compressor(data: CompressorDataInput):
-
+ 
     fluid = "Ammonia"
-
+ 
     voltage = 380.0
-
+ 
     power_factor = 0.85
-
+ 
     # =====================================================
     # DEFAULT RESULT
     # =====================================================
     alarms = []
-
+ 
     result = {
-
+ 
         "calculated_ql_kw": "--",
-
+ 
         "power_kw": "--",
-
+ 
         "actual_cop": "--",
-
+ 
         "system_cop": "--",
-
+ 
         "cycle_cop": "--",
-
+ 
         "superheat_suc": "--",
-
+ 
         "subcooling": "--",
-
+ 
         "pressure_ratio": "--",
-
+ 
         "systems": {
-
+ 
             "sensor": {
                 "status": "Unknown",
                 "text": "--"
             },
-
+ 
             "condenser": {
                 "status": "Unknown",
                 "text": "--"
             }
         }
     }
-
+ 
     try:
-
+ 
         # =================================================
         # PRESSURE
         # =================================================
-
+ 
         p_suc_pa = None
         p_dis_pa = None
-
+ 
         if data.sp_kg is not None:
             p_suc_pa = (
                 data.sp_kg * 98066.5
             )
-
+ 
         if data.dp_kg is not None:
             p_dis_pa = (
                 data.dp_kg * 98066.5
             ) 
-
+ 
         # =================================================
         # TEMPERATURE
         # =================================================
-
+ 
         t_suc_k = None
         t_dis_k = None
-
+ 
         if data.st_c is not None:
             t_suc_k = data.st_c + 273.15
-
+ 
         if data.dt_c is not None:
             t_dis_k = data.dt_c + 273.15
-
+ 
         # =================================================
         # ENTHALPY
         # =================================================
-
+ 
         h1 = None
         h2 = None
         h3 = None
-
+ 
         if p_suc_pa and t_suc_k:
-
+ 
             h1 = CP.PropsSI(
                 'H',
                 'P',
@@ -195,9 +195,9 @@ def diagnose_compressor(data: CompressorDataInput):
                 t_suc_k,
                 fluid
             )
-
+ 
         if p_dis_pa and t_dis_k:
-
+ 
             h2 = CP.PropsSI(
                 'H',
                 'P',
@@ -206,16 +206,16 @@ def diagnose_compressor(data: CompressorDataInput):
                 t_dis_k,
                 fluid
             )
-
+ 
         # =================================================
         # LIQUID ENTHALPY
         # =================================================
-
+ 
         if (
             p_dis_pa and
             data.liquid_temp_c is not None
         ):
-
+ 
             h3 = CP.PropsSI(
                 'H',
                 'P',
@@ -224,88 +224,93 @@ def diagnose_compressor(data: CompressorDataInput):
                 data.liquid_temp_c + 273.15,
                 fluid
             )
-
+ 
         elif p_dis_pa:
-
-            h3 = CP.PropsSI(
-                'H',
-                'P',
-                p_dis_pa,
-                'Q',
-                0,
-                fluid
-            )
-
+ 
+            try:
+                h3 = CP.PropsSI(
+                    'H',
+                    'P',
+                    p_dis_pa,
+                    'Q',
+                    0,
+                    fluid
+                )
+                print(f"DEBUG h3 fallback OK: {h3:.2f} J/kg at p_dis={p_dis_pa:.1f} Pa")
+            except Exception as ex:
+                print(f"DEBUG h3 fallback ERROR: {ex}")
+                h3 = None
+ 
         # =================================================
         # COOLING CAPACITY
         # =================================================
-
+ 
         ql_kw = None
-
+ 
         if (
             data.mass_flow_kg_s is not None and
             h1 is not None and
             h3 is not None
         ):
-
+ 
             ql_kw = (
                 data.mass_flow_kg_s *
                 ((h1 - h3) / 1000)
             )
-
+ 
         # =================================================
         # POWER
         # =================================================
-
+ 
         power_kw = None
-
+ 
         if data.current_amp is not None:
-
+ 
             power_kw = (
                 math.sqrt(3) *
                 voltage *
                 data.current_amp *
                 power_factor
             ) / 1000
-
+ 
         # =================================================
         # SYSTEM POWER
         # =================================================
-
+ 
         total_power_kw = None
-
+ 
         if power_kw is not None:
-
+ 
             fan_power = (
                 data.fan_pump_kw
                 if data.fan_pump_kw is not None
                 else 0
             )
-
+ 
             total_power_kw = (
                 power_kw + fan_power
             )
-
+ 
         # =================================================
         # ACTUAL COP
         # =================================================
-
+ 
         actual_cop = None
-
+ 
         if (
             ql_kw is not None and
             power_kw is not None and
             power_kw > 0
         ):
-
+ 
             actual_cop = (
                 ql_kw / power_kw
             )
-
+ 
             if actual_cop is not None:
-
+ 
                 if actual_cop < 2:
-
+ 
                     alarms.append({
                         "severity": "Warning",
                         "title": "Low COP",
@@ -321,52 +326,55 @@ def diagnose_compressor(data: CompressorDataInput):
                             "ตรวจโหลดระบบ"
                         ]
                     })
-
+ 
         # =================================================
         # SYSTEM COP
         # =================================================
-
+ 
         system_cop = None
-
+ 
         if (
             ql_kw is not None and
             total_power_kw is not None and
             total_power_kw > 0
         ):
-
+ 
             system_cop = (
                 ql_kw / total_power_kw
             )
-
+ 
         # =================================================
         # CYCLE COP
         # =================================================
-
+ 
         cycle_cop = None
-
+ 
+        print(f"DEBUG cycle_cop check: h1={h1}, h2={h2}, h3={h3}")
+ 
         if (
             h1 is not None and
             h2 is not None and
             h3 is not None and
             (h2 - h1) != 0
         ):
-
+ 
             cycle_cop = (
                 (h1 - h3) /
                 (h2 - h1)
             )
-
+            print(f"DEBUG cycle_cop = {cycle_cop:.4f}")
+ 
         # =================================================
         # SUPERHEAT
         # =================================================
-
+ 
         superheat = None
-
+ 
         if (
             p_suc_pa and
             data.st_c is not None
         ):
-
+ 
             t_sat_suc = CP.PropsSI(
                 'T',
                 'P',
@@ -375,16 +383,16 @@ def diagnose_compressor(data: CompressorDataInput):
                 1,
                 fluid
             ) - 273.15
-
+ 
             superheat = (
                 data.st_c - t_sat_suc
             )
         
-
+ 
         if superheat is not None:
-
+ 
             if superheat > 15:
-
+ 
                 alarms.append({
                     "severity": "Warning",
                     "title": "High Superheat",
@@ -400,9 +408,9 @@ def diagnose_compressor(data: CompressorDataInput):
                         "ตรวจโหลดห้องเย็น"
                     ]
                 })
-
+ 
             elif superheat < 2:
-
+ 
                 alarms.append({
                     "severity": "Warning",
                     "title": "Low Superheat",
@@ -418,18 +426,18 @@ def diagnose_compressor(data: CompressorDataInput):
                     ]
                 })
             
-
+ 
         # =================================================
         # SUBCOOLING
         # =================================================
-
+ 
         subcooling = None
-
+ 
         if (
             p_dis_pa and
             data.liquid_temp_c is not None
         ):
-
+ 
             t_sat_dis = CP.PropsSI(
                 'T',
                 'P',
@@ -438,17 +446,17 @@ def diagnose_compressor(data: CompressorDataInput):
                 0,
                 fluid
             ) - 273.15
-
+ 
             subcooling = (
                 t_sat_dis -
                 data.liquid_temp_c
             )
-
+ 
             if (
                 data.condenser_temp_c is not None and
                 p_dis_pa
             ):
-
+ 
                 t_sat_dis = CP.PropsSI(
                     'T',
                     'P',
@@ -457,11 +465,11 @@ def diagnose_compressor(data: CompressorDataInput):
                     1,
                     fluid
                 ) - 273.15
-
+ 
                 approach = t_sat_dis - data.condenser_temp_c
-
+ 
                 if approach > 15:
-
+ 
                     alarms.append({
                         "severity": "Critical",
                         "title": "High Condensing Temperature",
@@ -477,166 +485,166 @@ def diagnose_compressor(data: CompressorDataInput):
                             "ตรวจ cooling water"
                         ]
                     })
-
+ 
                 
-
+ 
         # =================================================
         # PRESSURE RATIO
         # =================================================
-
+ 
         pressure_ratio = None
-
+ 
         if (
             p_suc_pa and
             p_dis_pa and
             p_suc_pa > 0
         ):
-
+ 
             pressure_ratio = (
                 p_dis_pa / p_suc_pa
             )
-
+ 
         # =================================================
         # STATUS
         # =================================================
-
+ 
         sensor_status = "Unknown"
-
+ 
         if superheat is not None:
-
+ 
             if 2 <= superheat <= 15:
                 sensor_status = "Normal"
-
+ 
             else:
                 sensor_status = "Warning"
-
+ 
         condenser_status = "Unknown"
-
+ 
         # =================================================
         # UPDATE RESULT
         # =================================================
-
+ 
         result.update({
-
+ 
             "calculated_ql_kw":
                 safe_round(ql_kw),
-
+ 
             "power_kw":
                 safe_round(power_kw),
-
+ 
             "actual_cop":
                 safe_round(actual_cop),
-
+ 
             "system_cop":
                 safe_round(system_cop),
-
+ 
             "cycle_cop":
                 safe_round(cycle_cop),
-
+ 
             "superheat_suc":
                 safe_round(superheat),
-
+ 
             "subcooling":
                 safe_round(subcooling),
-
+ 
             "pressure_ratio":
                 safe_round(pressure_ratio),
-
+ 
             "alarms": alarms,
-
+ 
             "systems": {
-
+ 
                 "sensor": {
-
+ 
                     "status":
                         sensor_status,
-
+ 
                     "text":
                         f"Superheat = {safe_round(superheat)}"
                 },
-
+ 
                 "condenser": {
-
+ 
                     "status":
                         condenser_status,
-
+ 
                     "text":
                         "--"
                 }
             }
         })
-
+ 
         return result
-
+ 
     except Exception as e:
-
+ 
         print("ERROR =", e)
-
+ 
         return result
-
+ 
 # =========================================================
 # SAVE DATA
 # =========================================================
-
+ 
 @app.post("/api/metrics")
-
+ 
 async def save_data(payload: CompressorDataInput):
-
+ 
     diag = diagnose_compressor(payload)
-
+ 
     tz_th = timezone(
         timedelta(hours=7)
     )
-
+ 
     record_time = (
     payload.timestamp.astimezone(tz_th)
     if payload.timestamp
     else datetime.now(tz_th)
     )
-
+ 
     document = {
-
+ 
         "compressor_id":
             payload.compressor_id,
-
+ 
         "timestamp":
             record_time,
-
+ 
         "inputs_snapshot":
             payload.model_dump(),
-
+ 
         "diagnosis":
             diag
     }
-
+ 
     await metrics_collection.insert_one(
         document
     )
-
+ 
     return {
-
+ 
         "status": "Success",
-
+ 
         "analysis": diag
     }
-
+ 
 # =========================================================
 # GET DATA
 # =========================================================
-
+ 
 @app.get("/api/metrics/{compressor_id}")
-
+ 
 async def get_dashboard_data(
     compressor_id: str,
     limit: int = 2000,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None
 ):
-
+ 
     query: dict = {"compressor_id": compressor_id}
-
+ 
     tz_th = timezone(timedelta(hours=7))
-
+ 
     if start or end:
         ts_filter = {}
         if start:
@@ -644,79 +652,79 @@ async def get_dashboard_data(
         if end:
             ts_filter["$lte"] = end.astimezone(tz_th)
         query["timestamp"] = ts_filter
-
+ 
     cursor = metrics_collection.find(query).sort(
-
+ 
         "timestamp",
         -1
-
+ 
     ).limit(limit)
-
+ 
     data_list = []
-
+ 
     async for doc in cursor:
-
+ 
         doc["_id"] = str(doc["_id"])
-
+ 
         if "timestamp" in doc and doc["timestamp"]:
-
+ 
             doc["timestamp"] = (
             doc["timestamp"]
             .astimezone(timezone(timedelta(hours=7)))
             .isoformat()
         )
-
+ 
         data_list.append(doc)
-
+ 
     return data_list
-
+ 
 # =========================================================
 # P-H DIAGRAM ENDPOINT
 # =========================================================
-
+ 
 # ----------------------------------------------------------
 # Helper: build ammonia saturation dome via CoolProp
 # Returns list of {h, p} points for liquid side + vapour side
 # ----------------------------------------------------------
-
+ 
 def build_saturation_dome(
     fluid: str = "Ammonia",
     n_points: int = 60
 ) -> dict:
-
-
+ 
+ 
     # Temperature range: -50 °C to critical point (~132.25 °C)
     T_min_K = 223.15   # -50 °C
     T_crit_K = CP.PropsSI("Tcrit", fluid)
     T_max_K  = T_crit_K - 0.5   # stop just below critical
-
+ 
     temps = np.linspace(T_min_K, T_max_K, n_points)
-
+ 
     liq_points = []   # saturated liquid (Q=0)
     vap_points = []   # saturated vapour (Q=1)
-
+ 
     for T in temps:
         try:
             h_liq = CP.PropsSI("H", "T", T, "Q", 0, fluid) / 1000  # kJ/kg
             h_vap = CP.PropsSI("H", "T", T, "Q", 1, fluid) / 1000
             p_mpa = CP.PropsSI("P", "T", T, "Q", 0, fluid) / 1e6   # MPa
-
+ 
             liq_points.append({"h": round(h_liq, 2), "p": round(p_mpa, 4)})
             vap_points.append({"h": round(h_vap, 2), "p": round(p_mpa, 4)})
         except Exception:
             continue
-
+ 
     # Critical point
     h_crit = CP.PropsSI("H", "T", T_crit_K, "Q", 0, fluid) / 1000
     p_crit = CP.PropsSI("P", "T", T_crit_K, "Q", 0, fluid) / 1e6
-
+ 
     return {
         "liquid": liq_points,
         "vapour": vap_points,
         "critical": {"h": round(h_crit, 2), "p": round(p_crit, 4)},
     }
-
-
+ 
+ 
 # ----------------------------------------------------------
 # Helper: compute cycle points from raw sensor inputs
 # Returns None for each point that cannot be computed
@@ -728,15 +736,15 @@ def build_saturation_dome(
 #   3 → condenser outlet  (liquid at discharge pressure)
 #   4 → evaporator inlet  (after expansion valve, throttling → h4 = h3)
 # ----------------------------------------------------------
-
+ 
 def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
-
+ 
     sp_kg  = inputs.get("sp_kg")
     st_c   = inputs.get("st_c")
     dp_kg  = inputs.get("dp_kg")
     dt_c   = inputs.get("dt_c")
     liq_c  = inputs.get("liquid_temp_c")
-
+ 
     points = {
         "point1":  None,   # suction (comp inlet)
         "point2":  None,   # discharge actual (comp outlet)
@@ -749,17 +757,17 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
         "t_sat_dis_c": None,
         "isentropic_efficiency": None,
     }
-
+ 
     try:
         # ── Pressures ──────────────────────────────────────
         p_suc_pa = float(sp_kg) * 98066.5 if sp_kg is not None else None
         p_dis_pa = float(dp_kg) * 98066.5 if dp_kg is not None else None
-
+ 
         if p_suc_pa:
             points["p_suc_mpa"] = round(p_suc_pa / 1e6, 4)
         if p_dis_pa:
             points["p_dis_mpa"] = round(p_dis_pa / 1e6, 4)
-
+ 
         # ── Saturation temperatures ─────────────────────────
         if p_suc_pa:
             t_sat_suc = CP.PropsSI("T", "P", p_suc_pa, "Q", 1, fluid) - 273.15
@@ -767,7 +775,7 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
         if p_dis_pa:
             t_sat_dis = CP.PropsSI("T", "P", p_dis_pa, "Q", 1, fluid) - 273.15
             points["t_sat_dis_c"] = round(t_sat_dis, 2)
-
+ 
         # ── Point 1: compressor inlet (suction) ────────────
         if p_suc_pa and st_c is not None:
             t1_k = float(st_c) + 273.15
@@ -779,7 +787,7 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
                 "label": "1 — Comp. inlet",
                 "t_c": round(float(st_c), 2),
             }
-
+ 
             # ── Point 2s: isentropic discharge ─────────────
             if p_dis_pa:
                 h2s = CP.PropsSI("H", "P", p_dis_pa, "S", s1, fluid) / 1000
@@ -788,7 +796,7 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
                     "p": round(p_dis_pa / 1e6, 4),
                     "label": "2s — Isentropic",
                 }
-
+ 
         # ── Point 2: compressor outlet (discharge actual) ───
         if p_dis_pa and dt_c is not None:
             t2_k = float(dt_c) + 273.15
@@ -799,7 +807,7 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
                 "label": "2 — Comp. outlet",
                 "t_c": round(float(dt_c), 2),
             }
-
+ 
             # ── Isentropic efficiency ───────────────────────
             if points["point2s"] and points["point1"]:
                 h1_val  = points["point1"]["h"]
@@ -807,7 +815,7 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
                 if (h2 - h1_val) != 0:
                     eta_is = (h2s_val - h1_val) / (h2 - h1_val)
                     points["isentropic_efficiency"] = round(eta_is, 4)
-
+ 
         # ── Point 3: condenser outlet (liquid) ──────────────
         if p_dis_pa:
             if liq_c is not None:
@@ -818,14 +826,14 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
                 # fall back: saturated liquid at discharge pressure
                 h3   = CP.PropsSI("H", "P", p_dis_pa, "Q", 0, fluid) / 1000
                 t3_c = round(CP.PropsSI("T", "P", p_dis_pa, "Q", 0, fluid) - 273.15, 2)
-
+ 
             points["point3"] = {
                 "h": round(h3, 2),
                 "p": round(p_dis_pa / 1e6, 4),
                 "label": "3 — Cond. outlet",
                 "t_c": t3_c,
             }
-
+ 
             # ── Point 4: evaporator inlet (throttling h4 = h3) ──
             if p_suc_pa:
                 points["point4"] = {
@@ -833,13 +841,13 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
                     "p": round(p_suc_pa / 1e6, 4),
                     "label": "4 — Evap. inlet",
                 }
-
+ 
     except Exception as e:
         print("P-H compute error:", e)
-
+ 
     return points
-
-
+ 
+ 
 # ----------------------------------------------------------
 # GET /api/ph-diagram/{compressor_id}
 #
@@ -855,19 +863,19 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
 #     "timestamp": "...",
 #   }
 # ----------------------------------------------------------
-
+ 
 @app.get("/api/ph-diagram/{compressor_id}")
-
+ 
 async def get_ph_diagram(
     compressor_id: str,
     record_id: Optional[str] = None,
 ):
-
+ 
     # ── Fetch the right document from MongoDB ────────────
     if record_id:
-
+ 
         from bson import ObjectId
-
+ 
         try:
             doc = await metrics_collection.find_one(
                 {"_id": ObjectId(record_id), "compressor_id": compressor_id}
@@ -877,29 +885,29 @@ async def get_ph_diagram(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="record_id ไม่ถูกต้อง"
             )
-
+ 
     else:
         # latest record for this compressor
         doc = await metrics_collection.find_one(
             {"compressor_id": compressor_id},
             sort=[("timestamp", -1)]
         )
-
+ 
     if doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"ไม่พบข้อมูลของ {compressor_id}"
         )
-
+ 
     # ── Pull raw sensor inputs from the stored snapshot ──
     inputs = doc.get("inputs_snapshot", {})
-
+ 
     # ── Compute cycle points ─────────────────────────────
     cycle = compute_cycle_points(inputs)
-
+ 
     # ── Build saturation dome (cached-friendly; same for all) ──
     dome = build_saturation_dome()
-
+ 
     # ── Format timestamp ─────────────────────────────────
     tz_th = timezone(timedelta(hours=7))
     ts = doc.get("timestamp")
@@ -907,7 +915,7 @@ async def get_ph_diagram(
         ts_str = ts.astimezone(tz_th).isoformat()
     else:
         ts_str = str(ts) if ts else None
-
+ 
     return {
         "compressor_id": compressor_id,
         "timestamp": ts_str,
@@ -915,16 +923,16 @@ async def get_ph_diagram(
         "saturation_dome": dome,
         "cycle": cycle,
     }
-
-
+ 
+ 
 # =========================================================
 # RUN SERVER
 # =========================================================
-
+ 
 if __name__ == "__main__":
-
+ 
     import uvicorn
-
+ 
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
