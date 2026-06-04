@@ -671,6 +671,254 @@ async def get_dashboard_data(
     return data_list
 
 # =========================================================
+# P-H DIAGRAM ENDPOINT
+# =========================================================
+
+# ----------------------------------------------------------
+# Helper: build ammonia saturation dome via CoolProp
+# Returns list of {h, p} points for liquid side + vapour side
+# ----------------------------------------------------------
+
+def build_saturation_dome(
+    fluid: str = "Ammonia",
+    n_points: int = 60
+) -> dict:
+
+    import numpy as np
+
+    # Temperature range: -50 °C to critical point (~132.25 °C)
+    T_min_K = 223.15   # -50 °C
+    T_crit_K = CP.PropsSI("Tcrit", fluid)
+    T_max_K  = T_crit_K - 0.5   # stop just below critical
+
+    temps = np.linspace(T_min_K, T_max_K, n_points)
+
+    liq_points = []   # saturated liquid (Q=0)
+    vap_points = []   # saturated vapour (Q=1)
+
+    for T in temps:
+        try:
+            h_liq = CP.PropsSI("H", "T", T, "Q", 0, fluid) / 1000  # kJ/kg
+            h_vap = CP.PropsSI("H", "T", T, "Q", 1, fluid) / 1000
+            p_mpa = CP.PropsSI("P", "T", T, "Q", 0, fluid) / 1e6   # MPa
+
+            liq_points.append({"h": round(h_liq, 2), "p": round(p_mpa, 4)})
+            vap_points.append({"h": round(h_vap, 2), "p": round(p_mpa, 4)})
+        except Exception:
+            continue
+
+    # Critical point
+    h_crit = CP.PropsSI("H", "T", T_crit_K, "Q", 0, fluid) / 1000
+    p_crit = CP.PropsSI("P", "T", T_crit_K, "Q", 0, fluid) / 1e6
+
+    return {
+        "liquid": liq_points,
+        "vapour": vap_points,
+        "critical": {"h": round(h_crit, 2), "p": round(p_crit, 4)},
+    }
+
+
+# ----------------------------------------------------------
+# Helper: compute cycle points from raw sensor inputs
+# Returns None for each point that cannot be computed
+#
+# Refrigeration cycle (simple single-stage):
+#   1 → compressor inlet  (suction, actual superheat)
+#   2 → compressor outlet (discharge, actual)
+#   2s→ isentropic discharge (ideal, for isentropic eff.)
+#   3 → condenser outlet  (liquid at discharge pressure)
+#   4 → evaporator inlet  (after expansion valve, throttling → h4 = h3)
+# ----------------------------------------------------------
+
+def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
+
+    sp_kg  = inputs.get("sp_kg")
+    st_c   = inputs.get("st_c")
+    dp_kg  = inputs.get("dp_kg")
+    dt_c   = inputs.get("dt_c")
+    liq_c  = inputs.get("liquid_temp_c")
+
+    points = {
+        "point1":  None,   # suction (comp inlet)
+        "point2":  None,   # discharge actual (comp outlet)
+        "point2s": None,   # discharge isentropic (ideal)
+        "point3":  None,   # condenser outlet (liquid)
+        "point4":  None,   # evaporator inlet (after expansion)
+        "p_suc_mpa": None,
+        "p_dis_mpa": None,
+        "t_sat_suc_c": None,
+        "t_sat_dis_c": None,
+        "isentropic_efficiency": None,
+    }
+
+    try:
+        # ── Pressures ──────────────────────────────────────
+        p_suc_pa = float(sp_kg) * 98066.5 if sp_kg is not None else None
+        p_dis_pa = float(dp_kg) * 98066.5 if dp_kg is not None else None
+
+        if p_suc_pa:
+            points["p_suc_mpa"] = round(p_suc_pa / 1e6, 4)
+        if p_dis_pa:
+            points["p_dis_mpa"] = round(p_dis_pa / 1e6, 4)
+
+        # ── Saturation temperatures ─────────────────────────
+        if p_suc_pa:
+            t_sat_suc = CP.PropsSI("T", "P", p_suc_pa, "Q", 1, fluid) - 273.15
+            points["t_sat_suc_c"] = round(t_sat_suc, 2)
+        if p_dis_pa:
+            t_sat_dis = CP.PropsSI("T", "P", p_dis_pa, "Q", 1, fluid) - 273.15
+            points["t_sat_dis_c"] = round(t_sat_dis, 2)
+
+        # ── Point 1: compressor inlet (suction) ────────────
+        if p_suc_pa and st_c is not None:
+            t1_k = float(st_c) + 273.15
+            h1   = CP.PropsSI("H", "P", p_suc_pa, "T", t1_k, fluid) / 1000
+            s1   = CP.PropsSI("S", "P", p_suc_pa, "T", t1_k, fluid)
+            points["point1"] = {
+                "h": round(h1, 2),
+                "p": round(p_suc_pa / 1e6, 4),
+                "label": "1 — Comp. inlet",
+                "t_c": round(float(st_c), 2),
+            }
+
+            # ── Point 2s: isentropic discharge ─────────────
+            if p_dis_pa:
+                h2s = CP.PropsSI("H", "P", p_dis_pa, "S", s1, fluid) / 1000
+                points["point2s"] = {
+                    "h": round(h2s, 2),
+                    "p": round(p_dis_pa / 1e6, 4),
+                    "label": "2s — Isentropic",
+                }
+
+        # ── Point 2: compressor outlet (discharge actual) ───
+        if p_dis_pa and dt_c is not None:
+            t2_k = float(dt_c) + 273.15
+            h2   = CP.PropsSI("H", "P", p_dis_pa, "T", t2_k, fluid) / 1000
+            points["point2"] = {
+                "h": round(h2, 2),
+                "p": round(p_dis_pa / 1e6, 4),
+                "label": "2 — Comp. outlet",
+                "t_c": round(float(dt_c), 2),
+            }
+
+            # ── Isentropic efficiency ───────────────────────
+            if points["point2s"] and points["point1"]:
+                h1_val  = points["point1"]["h"]
+                h2s_val = points["point2s"]["h"]
+                if (h2 - h1_val) != 0:
+                    eta_is = (h2s_val - h1_val) / (h2 - h1_val)
+                    points["isentropic_efficiency"] = round(eta_is, 4)
+
+        # ── Point 3: condenser outlet (liquid) ──────────────
+        if p_dis_pa:
+            if liq_c is not None:
+                t3_k = float(liq_c) + 273.15
+                h3   = CP.PropsSI("H", "P", p_dis_pa, "T", t3_k, fluid) / 1000
+                t3_c = round(float(liq_c), 2)
+            else:
+                # fall back: saturated liquid at discharge pressure
+                h3   = CP.PropsSI("H", "P", p_dis_pa, "Q", 0, fluid) / 1000
+                t3_c = round(CP.PropsSI("T", "P", p_dis_pa, "Q", 0, fluid) - 273.15, 2)
+
+            points["point3"] = {
+                "h": round(h3, 2),
+                "p": round(p_dis_pa / 1e6, 4),
+                "label": "3 — Cond. outlet",
+                "t_c": t3_c,
+            }
+
+            # ── Point 4: evaporator inlet (throttling h4 = h3) ──
+            if p_suc_pa:
+                points["point4"] = {
+                    "h": round(h3, 2),   # isenthalpic expansion
+                    "p": round(p_suc_pa / 1e6, 4),
+                    "label": "4 — Evap. inlet",
+                }
+
+    except Exception as e:
+        print("P-H compute error:", e)
+
+    return points
+
+
+# ----------------------------------------------------------
+# GET /api/ph-diagram/{compressor_id}
+#
+# Query params:
+#   record_id (str, optional) — fetch a specific document _id
+#   If omitted → use the latest record for that compressor
+#
+# Response:
+#   {
+#     "saturation_dome": { "liquid": [...], "vapour": [...], "critical": {...} },
+#     "cycle": { "point1": {...}, "point2": {...}, ... },
+#     "compressor_id": "COMP-01",
+#     "timestamp": "...",
+#   }
+# ----------------------------------------------------------
+
+@app.get("/api/ph-diagram/{compressor_id}")
+
+async def get_ph_diagram(
+    compressor_id: str,
+    record_id: Optional[str] = None,
+):
+
+    # ── Fetch the right document from MongoDB ────────────
+    if record_id:
+
+        from bson import ObjectId
+
+        try:
+            doc = await metrics_collection.find_one(
+                {"_id": ObjectId(record_id), "compressor_id": compressor_id}
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="record_id ไม่ถูกต้อง"
+            )
+
+    else:
+        # latest record for this compressor
+        doc = await metrics_collection.find_one(
+            {"compressor_id": compressor_id},
+            sort=[("timestamp", -1)]
+        )
+
+    if doc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"ไม่พบข้อมูลของ {compressor_id}"
+        )
+
+    # ── Pull raw sensor inputs from the stored snapshot ──
+    inputs = doc.get("inputs_snapshot", {})
+
+    # ── Compute cycle points ─────────────────────────────
+    cycle = compute_cycle_points(inputs)
+
+    # ── Build saturation dome (cached-friendly; same for all) ──
+    dome = build_saturation_dome()
+
+    # ── Format timestamp ─────────────────────────────────
+    tz_th = timezone(timedelta(hours=7))
+    ts = doc.get("timestamp")
+    if ts and hasattr(ts, "astimezone"):
+        ts_str = ts.astimezone(tz_th).isoformat()
+    else:
+        ts_str = str(ts) if ts else None
+
+    return {
+        "compressor_id": compressor_id,
+        "timestamp": ts_str,
+        "record_id": str(doc["_id"]),
+        "saturation_dome": dome,
+        "cycle": cycle,
+    }
+
+
+# =========================================================
 # RUN SERVER
 # =========================================================
 
