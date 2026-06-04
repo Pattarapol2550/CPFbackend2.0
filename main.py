@@ -2,9 +2,10 @@ import math
 import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import numpy as np
 from dotenv import load_dotenv
 import CoolProp.CoolProp as CP
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
@@ -63,11 +64,10 @@ class CompressorDataInput(BaseModel):
     # OPTIONAL INPUTS
     # =====================================================
 
-    sp_kg: Optional[float] = None
-    st_c: Optional[float] = None
-
-    dp_kg: Optional[float] = None
-    dt_c: Optional[float] = None
+    sp_kg: float
+    st_c:  float
+    dp_kg: float
+    dt_c:  float
 
     liquid_temp_c: Optional[float] = None
 
@@ -603,7 +603,7 @@ async def save_data(payload: CompressorDataInput):
             record_time,
 
         "inputs_snapshot":
-            payload.dict(),
+            payload.model_dump(),
 
         "diagnosis":
             diag
@@ -684,7 +684,6 @@ def build_saturation_dome(
     n_points: int = 60
 ) -> dict:
 
-    import numpy as np
 
     # Temperature range: -50 °C to critical point (~132.25 °C)
     T_min_K = 223.15   # -50 °C
