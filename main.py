@@ -734,25 +734,28 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
                     "label": "2s — Isentropic",
                 }
  
-        # ── Point 2: compressor outlet (discharge actual) ───
-        if p_dis_pa and dt_c is not None:
-            t2_k = float(dt_c) + 273.15
-            h2   = CP.PropsSI("H", "P", p_dis_pa, "T", t2_k, fluid) / 1000
+        # ── Point 2: compressor outlet — ถ้ามี DT ใช้จริง ถ้าไม่มี assume η=0.70 ───
+        if p_dis_pa and points["point1"] is not None and points["point2s"] is not None:
+            h1_val  = points["point1"]["h"]
+            h2s_val = points["point2s"]["h"]
+            if dt_c is not None:
+                t2_k = float(dt_c) + 273.15
+                h2   = CP.PropsSI("H", "P", p_dis_pa, "T", t2_k, fluid) / 1000
+                dt_used = round(float(dt_c), 2)
+                if (h2 - h1_val) != 0:
+                    eta_is = (h2s_val - h1_val) / (h2 - h1_val)
+                    points["isentropic_efficiency"] = round(eta_is, 4)
+            else:
+                h2 = h1_val + (h2s_val - h1_val) / 0.70
+                dt_used = round(CP.PropsSI("T", "P", p_dis_pa, "H", h2 * 1000, fluid) - 273.15, 2)
+                points["isentropic_efficiency"] = 0.70
             points["point2"] = {
                 "h": round(h2, 2),
                 "p": round(p_dis_pa / 1e6, 4),
                 "label": "2 — Comp. outlet",
-                "t_c": round(float(dt_c), 2),
+                "t_c": dt_used,
             }
- 
-            # ── Isentropic efficiency ───────────────────────
-            if points["point2s"] and points["point1"]:
-                h1_val  = points["point1"]["h"]
-                h2s_val = points["point2s"]["h"]
-                if (h2 - h1_val) != 0:
-                    eta_is = (h2s_val - h1_val) / (h2 - h1_val)
-                    points["isentropic_efficiency"] = round(eta_is, 4)
- 
+
         # ── Point 3: condenser outlet (liquid) ──────────────
         if p_dis_pa:
             if liq_c is not None:
