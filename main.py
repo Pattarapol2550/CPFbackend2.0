@@ -70,9 +70,11 @@ class CompressorDataInput(BaseModel):
     dt_c:  Optional[float] = None  # ถ้าไม่กรอก assume η_is=0.70
  
     liquid_temp_c: Optional[float] = None
- 
- 
- 
+
+    current_amp: Optional[float] = None
+
+    evaporator_room_temp_c: Optional[float] = None
+
     condenser_temp_c: Optional[float] = None
  
 # =========================================================
