@@ -17,6 +17,8 @@ from pydantic import BaseModel
 app = FastAPI(
     title="Ammonia Diagnostics API v2"
 )
+
+CP.set_reference_state("Ammonia", "IIR")
  
 # =========================================================
 # CORS
