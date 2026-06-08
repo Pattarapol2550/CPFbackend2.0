@@ -65,19 +65,13 @@ class CompressorDataInput(BaseModel):
     # =====================================================
  
     sp_kg: float
-    st_c:  float
     dp_kg: float
-    dt_c:  float
+    st_c:  Optional[float] = None  # ถ้าไม่กรอก assume SH=5K
+    dt_c:  Optional[float] = None  # ถ้าไม่กรอก assume η_is=0.70
  
     liquid_temp_c: Optional[float] = None
  
-    mass_flow_kg_s: Optional[float] = None
  
-    current_amp: Optional[float] = None
- 
-    fan_pump_kw: Optional[float] = None
- 
-    evaporator_room_temp_c: Optional[float] = None
  
     condenser_temp_c: Optional[float] = None
  
@@ -104,9 +98,9 @@ def diagnose_compressor(data: CompressorDataInput):
  
     fluid = "Ammonia"
  
-    voltage = 380.0
+    voltage = 385.0
  
-    power_factor = 0.85
+    power_factor = 0.86
  
     # =====================================================
     # DEFAULT RESULT
@@ -115,15 +109,15 @@ def diagnose_compressor(data: CompressorDataInput):
  
     result = {
  
-        "calculated_ql_kw": "--",
+        "q_e_kw": "--",
  
         "power_kw": "--",
  
-        "actual_cop": "--",
+        "cop": "--",
  
-        "system_cop": "--",
+        
  
-        "cycle_cop": "--",
+        
  
         "superheat_suc": "--",
  
@@ -156,12 +150,12 @@ def diagnose_compressor(data: CompressorDataInput):
  
         if data.sp_kg is not None:
             p_suc_pa = (
-                data.sp_kg * 98066.5
+                data.sp_kg * 98066.5 + 101325
             )
  
         if data.dp_kg is not None:
             p_dis_pa = (
-                data.dp_kg * 98066.5
+                data.dp_kg * 98066.5 + 101325
             ) 
  
         # =================================================
@@ -181,31 +175,41 @@ def diagnose_compressor(data: CompressorDataInput):
         # ENTHALPY
         # =================================================
  
+
         h1 = None
         h2 = None
+        h2s = None
         h3 = None
- 
-        if p_suc_pa and t_suc_k:
- 
-            h1 = CP.PropsSI(
-                'H',
-                'P',
-                p_suc_pa,
-                'T',
-                t_suc_k,
-                fluid
-            )
- 
-        if p_dis_pa and t_dis_k:
- 
-            h2 = CP.PropsSI(
-                'H',
-                'P',
-                p_dis_pa,
-                'T',
-                t_dis_k,
-                fluid
-            )
+        sh_mode = "assumed"
+        dt_mode = "assumed"
+
+        # h1: ถ้ามี ST ใช้จริง ถ้าไม่มี assume SH=5K
+        if p_suc_pa:
+            if t_suc_k:
+                h1 = CP.PropsSI('H','P',p_suc_pa,'T',t_suc_k,fluid)
+                sh_mode = "measured"
+            else:
+                t_sat_suc_k = CP.PropsSI('T','P',p_suc_pa,'Q',1,fluid)
+                t1_assume = t_sat_suc_k + 5.0
+                h1 = CP.PropsSI('H','P',p_suc_pa,'T',t1_assume,fluid)
+                t_suc_k = t1_assume
+                sh_mode = "assumed_5K"
+
+        # h2s: isentropic (ต้องการ h1 ก่อน)
+        if h1 is not None and p_dis_pa and t_suc_k and p_suc_pa:
+            s1 = CP.PropsSI('S','P',p_suc_pa,'T',t_suc_k,fluid)
+            h2s = CP.PropsSI('H','P',p_dis_pa,'S',s1,fluid)
+
+        # h2: ถ้ามี DT ใช้จริง ถ้าไม่มี assume eta_is=0.70
+        if p_dis_pa:
+            if t_dis_k:
+                h2 = CP.PropsSI('H','P',p_dis_pa,'T',t_dis_k,fluid)
+                dt_mode = "measured"
+            elif h2s is not None and h1 is not None:
+                eta_is = 0.70
+                h2 = h1 + (h2s - h1) / eta_is
+                dt_mode = "assumed_eta07"
+
  
         # =================================================
         # LIQUID ENTHALPY
@@ -242,23 +246,6 @@ def diagnose_compressor(data: CompressorDataInput):
                 h3 = None
  
         # =================================================
-        # COOLING CAPACITY
-        # =================================================
- 
-        ql_kw = None
- 
-        if (
-            data.mass_flow_kg_s is not None and
-            h1 is not None and
-            h3 is not None
-        ):
- 
-            ql_kw = (
-                data.mass_flow_kg_s *
-                ((h1 - h3) / 1000)
-            )
- 
-        # =================================================
         # POWER
         # =================================================
  
@@ -274,95 +261,37 @@ def diagnose_compressor(data: CompressorDataInput):
             ) / 1000
  
         # =================================================
-        # SYSTEM POWER
+        # COP, Q_e, m_dot (logic เดียวกับเว็บคำนวณ)
         # =================================================
- 
-        total_power_kw = None
- 
-        if power_kw is not None:
- 
-            fan_power = (
-                data.fan_pump_kw
-                if data.fan_pump_kw is not None
-                else 0
-            )
- 
-            total_power_kw = (
-                power_kw + fan_power
-            )
- 
-        # =================================================
-        # ACTUAL COP
-        # =================================================
- 
-        actual_cop = None
- 
-        if (
-            ql_kw is not None and
-            power_kw is not None and
-            power_kw > 0
-        ):
- 
-            actual_cop = (
-                ql_kw / power_kw
-            )
- 
-            if actual_cop is not None:
- 
-                if actual_cop < 2:
- 
-                    alarms.append({
-                        "severity": "Warning",
-                        "title": "Low COP",
-                        "message": "ประสิทธิภาพระบบต่ำ",
-                        "possible_causes": [
-                            "โหลดสูงเกิน",
-                            "Compressor efficiency ต่ำ",
-                            "Condenser ทำงานไม่ดี"
-                        ],
-                        "recommendation": [
-                            "ตรวจ compressor",
-                            "ตรวจ condenser",
-                            "ตรวจโหลดระบบ"
-                        ]
-                    })
- 
-        # =================================================
-        # SYSTEM COP
-        # =================================================
- 
-        system_cop = None
- 
-        if (
-            ql_kw is not None and
-            total_power_kw is not None and
-            total_power_kw > 0
-        ):
- 
-            system_cop = (
-                ql_kw / total_power_kw
-            )
- 
-        # =================================================
-        # CYCLE COP
-        # =================================================
- 
-        cycle_cop = None
- 
-        print(f"DEBUG cycle_cop check: h1={h1}, h2={h2}, h3={h3}")
- 
-        if (
-            h1 is not None and
-            h2 is not None and
-            h3 is not None and
-            (h2 - h1) != 0
-        ):
- 
-            cycle_cop = (
-                (h1 - h3) /
-                (h2 - h1)
-            )
-            print(f"DEBUG cycle_cop = {cycle_cop:.4f}")
+
+        cop    = None
+        q_e_kw = None
+        m_dot  = None
+
+        if h1 is not None and h2 is not None and h3 is not None and (h2 - h1) != 0:
+            cop = (h1 - h3) / (h2 - h1)
+
+        if cop is not None and power_kw is not None and power_kw > 0:
+            q_e_kw = power_kw * cop
+            m_dot  = (q_e_kw * 1000) / (h1 - h3)  # kg/s
+
+        # COP alarm
+        if cop is not None and cop < 1.5:
+            alarms.append({
+                "severity": "Warning",
+                "title": "Low COP",
+                "message": "ประสิทธิภาพระบบต่ำ",
+                "possible_causes": [
+                    "โหลดสูงเกิน",
+                    "Compressor efficiency ต่ำ",
+                    "Condenser ทำงานไม่ดี"
+                ],
+                "recommendation": [
+                    "ตรวจ compressor",
+                    "ตรวจ condenser",
+                    "ตรวจโหลดระบบ"
+                ]
+            })
  
         # =================================================
         # SUPERHEAT
@@ -524,55 +453,61 @@ def diagnose_compressor(data: CompressorDataInput):
         # UPDATE RESULT
         # =================================================
  
+        # =================================================
+
+        # Enthalpy detail (kJ/kg)
+        h1_kj       = round(h1/1000, 2)  if h1  else None
+        h2_kj       = round(h2/1000, 2)  if h2  else None
+        h2s_kj      = round(h2s/1000, 2) if h2s else None
+        h3_kj       = round(h3/1000, 2)  if h3  else None
+        t_evap_c    = round(CP.PropsSI('T','P',p_suc_pa,'Q',1,fluid)-273.15,2) if p_suc_pa else None
+        t_cond_c    = round(CP.PropsSI('T','P',p_dis_pa,'Q',0,fluid)-273.15,2) if p_dis_pa else None
+        eta_is_pct  = round((h2s-h1)/(h2-h1)*100,1) if (h2s and h1 and h2 and (h2-h1)!=0) else None
+        q_l_kgkg    = round((h1-h3)/1000,2) if (h1 and h3) else None
+        w_comp_kgkg = round((h2-h1)/1000,2) if (h1 and h2) else None
+        m_dot_kgh   = round(m_dot*3600,1)   if m_dot else None
+
         result.update({
- 
-            "calculated_ql_kw":
-                safe_round(ql_kw),
- 
-            "power_kw":
-                safe_round(power_kw),
- 
-            "actual_cop":
-                safe_round(actual_cop),
- 
-            "system_cop":
-                safe_round(system_cop),
- 
-            "cycle_cop":
-                safe_round(cycle_cop),
- 
-            "superheat_suc":
-                safe_round(superheat),
- 
-            "subcooling":
-                safe_round(subcooling),
- 
-            "pressure_ratio":
-                safe_round(pressure_ratio),
- 
+
+            "power_kw":       safe_round(power_kw),
+            "cop":            safe_round(cop, 4),
+            "q_e_kw":         safe_round(q_e_kw),
+            "superheat_suc":  safe_round(superheat),
+            "subcooling":     safe_round(subcooling),
+            "pressure_ratio": safe_round(pressure_ratio),
+            "m_dot_kgh":      safe_round(m_dot_kgh),
+
             "alarms": alarms,
- 
+
+            "modes": {
+                "sh_mode": sh_mode,
+                "dt_mode": dt_mode,
+            },
+
+            "enthalpy": {
+                "t_evap_c":    t_evap_c,
+                "t_cond_c":    t_cond_c,
+                "h1":          h1_kj,
+                "h2":          h2_kj,
+                "h2s":         h2s_kj,
+                "h3":          h3_kj,
+                "eta_is_pct":  eta_is_pct,
+                "q_l_kgkg":    q_l_kgkg,
+                "w_comp_kgkg": w_comp_kgkg,
+            },
+
             "systems": {
- 
                 "sensor": {
- 
-                    "status":
-                        sensor_status,
- 
-                    "text":
-                        f"Superheat = {safe_round(superheat)}"
+                    "status": sensor_status,
+                    "text":   f"Superheat = {safe_round(superheat)}"
                 },
- 
                 "condenser": {
- 
-                    "status":
-                        condenser_status,
- 
-                    "text":
-                        "--"
+                    "status": condenser_status,
+                    "text":   "--"
                 }
             }
         })
+
  
         return result
  
@@ -760,8 +695,8 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
  
     try:
         # ── Pressures ──────────────────────────────────────
-        p_suc_pa = float(sp_kg) * 98066.5 if sp_kg is not None else None
-        p_dis_pa = float(dp_kg) * 98066.5 if dp_kg is not None else None
+        p_suc_pa = float(sp_kg) * 98066.5 + 101325 if sp_kg is not None else None
+        p_dis_pa = float(dp_kg) * 98066.5 + 101325 if dp_kg is not None else None
  
         if p_suc_pa:
             points["p_suc_mpa"] = round(p_suc_pa / 1e6, 4)
