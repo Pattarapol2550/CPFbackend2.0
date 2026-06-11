@@ -830,27 +830,25 @@ async def get_ph_diagram(
             )
 
     elif timestamp:
-        # หา record ที่ timestamp ใกล้เคียงที่สุด
-        # ค้นหา record แรกที่ <= timestamp (ก่อนหรือตรงเวลา)
+        # หา record ที่ตรงกับ timestamp เป๊ะ ± 1 วินาที เท่านั้น
+        # ถ้าไม่เจอในช่วงนั้น → 404 ทันที (ไม่ fallback ไป record ใกล้เคียง)
         tz_th = timezone(timedelta(hours=7))
         ts_aware = timestamp.astimezone(tz_th)
+        ts_low  = ts_aware - timedelta(seconds=1)
+        ts_high = ts_aware + timedelta(seconds=1)
 
         doc = await metrics_collection.find_one(
             {
                 "compressor_id": compressor_id,
-                "timestamp": {"$lte": ts_aware},
+                "timestamp": {"$gte": ts_low, "$lte": ts_high},
             },
-            sort=[("timestamp", -1)],   # ใกล้ที่สุดจากด้านหลัง
+            sort=[("timestamp", -1)],
         )
 
-        # ถ้าไม่เจอ record ก่อนหน้า ลองหา record แรกสุดหลังจากนั้น
         if doc is None:
-            doc = await metrics_collection.find_one(
-                {
-                    "compressor_id": compressor_id,
-                    "timestamp": {"$gt": ts_aware},
-                },
-                sort=[("timestamp", 1)],
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"ไม่พบข้อมูลของ {compressor_id} ในช่วงเวลาที่เลือก"
             )
  
     else:
