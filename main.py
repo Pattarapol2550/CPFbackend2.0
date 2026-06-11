@@ -811,6 +811,7 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
 async def get_ph_diagram(
     compressor_id: str,
     record_id: Optional[str] = None,
+    timestamp: Optional[datetime] = None,
 ):
  
     # ── Fetch the right document from MongoDB ────────────
@@ -826,6 +827,30 @@ async def get_ph_diagram(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="record_id ไม่ถูกต้อง"
+            )
+
+    elif timestamp:
+        # หา record ที่ timestamp ใกล้เคียงที่สุด
+        # ค้นหา record แรกที่ <= timestamp (ก่อนหรือตรงเวลา)
+        tz_th = timezone(timedelta(hours=7))
+        ts_aware = timestamp.astimezone(tz_th)
+
+        doc = await metrics_collection.find_one(
+            {
+                "compressor_id": compressor_id,
+                "timestamp": {"$lte": ts_aware},
+            },
+            sort=[("timestamp", -1)],   # ใกล้ที่สุดจากด้านหลัง
+        )
+
+        # ถ้าไม่เจอ record ก่อนหน้า ลองหา record แรกสุดหลังจากนั้น
+        if doc is None:
+            doc = await metrics_collection.find_one(
+                {
+                    "compressor_id": compressor_id,
+                    "timestamp": {"$gt": ts_aware},
+                },
+                sort=[("timestamp", 1)],
             )
  
     else:
