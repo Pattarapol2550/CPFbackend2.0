@@ -1,28 +1,111 @@
-# --- สภาพแวดล้อมและตัวแปรลับ ---
+# ============================================================
+# .gitignore — Ammonia Diagnostics API v2
+# ============================================================
+
+# ─── สภาพแวดล้อมและตัวแปรลับ ───────────────────────────────
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 env/
-__pycache__/
+ENV/
 
-# --- ไฟล์ระบบและไฟล์ชั่วคราว ---
-.DS_Store
-*.pyc
-*.pyo
+# ─── Python cache ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
 *.pyd
+*.pyo
+*.pyw
+
+# ─── Distribution / Packaging ───────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+site/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+
+# ─── Testing & Coverage ─────────────────────────────────────
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
+coverage.json
 htmlcov/
+nosetests.xml
+test-results/
+*.testout
 
-# --- ฐานข้อมูลและไฟล์ Logs ---
+# ─── Type checking ──────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# ─── Jupyter Notebook ───────────────────────────────────────
+.ipynb_checkpoints
+*.ipynb
+
+# ─── ฐานข้อมูลและไฟล์ Logs ──────────────────────────────────
 *.log
+*.log.*
+logs/
 *.db
+*.sqlite
 *.sqlite3
 data/
+dump/
+mongodump/
 
-# --- ส่วนเสริมสำหรับ VS Code/IDE ---
+# ─── FastAPI / Uvicorn ──────────────────────────────────────
+*.pid
+
+# ─── ระบบปฏิบัติการ ─────────────────────────────────────────
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+# Linux
+*~
+
+# ─── IDE และ Editor ─────────────────────────────────────────
+# VS Code
 .vscode/
+*.code-workspace
+# JetBrains (PyCharm, etc.)
 .idea/
+*.iml
+*.iws
+# Vim/Emacs
+*.swp
+*.swo
+*.bak
+*.orig
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+Session.vim
+.netrwhist
 
-# --- ไฟล์อัปโหลด (ถ้ามี) ---
+# ─── ไฟล์อัปโหลด / Static ───────────────────────────────────
 uploads/
+static/uploads/
+
+# ─── Docker (ถ้ามีในอนาคต) ───────────────────────────────────
+docker-compose.override.yml
+*.env.docker
+
+# ─── Render / Cloud deployment ──────────────────────────────
+.render/

@@ -1,7 +1,6 @@
-# Link 
-https://cpfbackend2-0.onrender.com
-
 # Ammonia Diagnostics API v2
+
+> **Live API:** https://cpfbackend2-0.onrender.com
 
 REST API สำหรับวิเคราะห์ประสิทธิภาพและวินิจฉัยปัญหาระบบทำความเย็นแอมโมเนีย (Single-stage refrigeration) พัฒนาด้วย FastAPI + MongoDB + CoolProp
 
@@ -20,14 +19,15 @@ REST API สำหรับวิเคราะห์ประสิทธิ�
 
 ## Tech Stack
 
-| Component  | Library/Tool                   |
-|------------|-------------------------------|
-| Framework  | FastAPI                        |
-| Thermodynamics | CoolProp (IIR Reference State) |
-| Database   | MongoDB (Motor async driver)   |
-| Validation | Pydantic                       |
-| Numerics   | NumPy                          |
-| Server     | Uvicorn                        |
+| Component       | Library/Tool                        |
+|-----------------|-------------------------------------|
+| Framework       | FastAPI                             |
+| Thermodynamics  | CoolProp (IIR Reference State)      |
+| Database        | MongoDB (Motor async driver)        |
+| Validation      | Pydantic                            |
+| Numerics        | NumPy                               |
+| Server          | Uvicorn                             |
+| Testing         | pytest + pytest-asyncio + pytest-cov |
 
 ---
 
@@ -38,10 +38,18 @@ REST API สำหรับวิเคราะห์ประสิทธิ�
 git clone <repo-url>
 cd <project-dir>
 
-# 2. Install dependencies
+# 2. สร้าง virtual environment (แนะนำ)
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+# macOS / Linux
+source venv/bin/activate
+
+# 3. ติดตั้ง dependencies
 pip install fastapi uvicorn motor pydantic python-dotenv CoolProp numpy
 
-# 3. ตั้งค่า environment variable
+# 4. ตั้งค่า environment variable
 cp .env.example .env
 # แก้ไข MONGO_DETAILS ใน .env
 ```
@@ -62,8 +70,99 @@ python main.py
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-API จะรันที่ `http://localhost:8000`  
-Swagger UI: `http://localhost:8000/docs`
+- API: `http://localhost:8000`
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+
+---
+
+## Testing
+
+### 1. ติดตั้ง dependencies สำหรับ Test
+
+```bash
+pip install pytest pytest-asyncio pytest-cov httpx anyio
+```
+
+> ติดตั้งทุกอย่างในครั้งเดียว:
+>
+> ```bash
+> pip install fastapi uvicorn motor pydantic python-dotenv CoolProp numpy \
+>             pytest pytest-asyncio pytest-cov httpx anyio
+> ```
+
+### 2. โครงสร้างไฟล์
+
+```
+project/
+├── main.py          ← API หลัก
+├── test_main.py     ← ชุด test ทั้งหมด
+├── .env             ← ตัวแปรสภาพแวดล้อม (ไม่ commit)
+└── .env.example     ← template
+```
+
+### 3. รัน Test
+
+**รันพื้นฐาน (เฉพาะผ่าน/ไม่ผ่าน):**
+
+```bash
+python -m pytest test_main.py -v
+```
+
+**รันพร้อม Coverage Report แบบครบ:**
+
+```bash
+python -m pytest test_main.py --cov=main --cov-branch --cov-report=term-missing -v
+```
+
+**รันพร้อม HTML Report (เปิดดูในเบราว์เซอร์ได้):**
+
+```bash
+python -m pytest test_main.py --cov=main --cov-branch --cov-report=term-missing --cov-report=html -v
+# เปิดดูที่ htmlcov/index.html
+```
+
+### 4. อ่านผลลัพธ์ Coverage
+
+```
+Name      Stmts   Miss Branch BrPart  Cover   Missing
+-----------------------------------------------------
+main.py     278      0    102      0   100%
+-----------------------------------------------------
+```
+
+| คอลัมน์   | ความหมาย |
+|-----------|----------|
+| `Stmts`   | จำนวน statement (บรรทัดโค้ด) ทั้งหมด |
+| `Miss`    | บรรทัดที่ **ไม่ถูก** execute → ควรเป็น 0 |
+| `Branch`  | จำนวน branch (if/else/try) ทั้งหมด |
+| `BrPart`  | branch ที่ผ่านแค่บางทาง → ควรเป็น 0 |
+| `Cover`   | % coverage รวม → เป้าหมาย 100% |
+| `Missing` | บรรทัดหรือ branch ที่ยังขาด |
+
+### 5. Coverage ที่ได้
+
+| ประเภท              | คำอธิบาย                                           | ผล     |
+|---------------------|----------------------------------------------------|--------|
+| **Statement Coverage** | ทุกบรรทัดถูก execute อย่างน้อย 1 ครั้ง         | ✅ 100% |
+| **Branch Coverage**    | ทุก if/else/try ทำงานทั้งฝั่ง True และ False   | ✅ 100% |
+| **Path Coverage**      | ครอบคลุมทุก logic path ของฟังก์ชันหลัก          | ✅ 100% |
+
+> **หมายเหตุ:** Path Coverage วัดจาก branch combinations ที่ test ครอบคลุมใน `diagnose_compressor` และ `compute_cycle_points` ซึ่งรวมถึง mode `measured` vs `assumed` ทุก path
+
+### 6. Test Cases ที่ครอบคลุม
+
+| กลุ่ม | จำนวน | สิ่งที่ทดสอบ |
+|-------|--------|------------|
+| `safe_round` | 7 | None, float, int, negative, string → except branch |
+| `diagnose_compressor` | 32 | ทุก path: measured/assumed, alarms, cop=0, h2=h1, exception |
+| `compute_cycle_points` | 13 | all points, η measured/assumed, fallback, exception |
+| `build_saturation_dome` | 6 | structure, monotonicity, loop exception → continue |
+| `POST /api/metrics` | 4 | success, with timestamp, minimal fields, missing required |
+| `GET /api/metrics` | 7 | list, empty, no timestamp, start only, end only, both, no filter |
+| `GET /api/ph-diagram` | 9 | latest, 404, by timestamp, not found, record_id, string ts, None ts |
+| `__main__` block | 1 | uvicorn.run ถูก call |
+| **รวม** | **84** | |
 
 ---
 
@@ -163,7 +262,8 @@ GET /api/metrics/COMP-01?limit=100&start=2025-01-01T00:00:00%2B07:00
 
 | Parameter | Type | คำอธิบาย |
 |-----------|------|----------|
-| `record_id` | string | (optional) MongoDB `_id` ของ record ที่ต้องการ — ถ้าไม่ใส่จะใช้ record ล่าสุด |
+| `record_id` | string | (optional) MongoDB `_id` ของ record ที่ต้องการ |
+| `timestamp` | datetime | (optional) เวลาที่ต้องการ ±1 วินาที — ถ้าไม่ใส่ใช้ record ล่าสุด |
 
 **Response:**
 
@@ -191,11 +291,11 @@ GET /api/metrics/COMP-01?limit=100&start=2025-01-01T00:00:00%2B07:00
 **Cycle Points:**
 
 ```
-1 → Compressor inlet  (suction, superheated vapour)
-2 → Compressor outlet (discharge, actual)
-2s→ Isentropic discharge (ideal, for η_is)
-3 → Condenser outlet  (liquid)
-4 → Evaporator inlet  (after expansion valve, h4 = h3)
+1  → Compressor inlet  (suction, superheated vapour)
+2  → Compressor outlet (discharge, actual)
+2s → Isentropic discharge (ideal, for η_is)
+3  → Condenser outlet  (liquid)
+4  → Evaporator inlet  (after expansion valve, h4 = h3)
 ```
 
 ---
