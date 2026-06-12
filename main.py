@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from motor.motor_asyncio import AsyncIOMotorClient
-from passlib.context import CryptContext
+import bcrypt
 from pydantic import BaseModel, EmailStr, field_validator
 import jwt
 
@@ -61,7 +61,6 @@ users_collection   = database.get_collection("users")   # ← collection ให�
 # PASSWORD + JWT HELPERS
 # =========================================================
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer  = HTTPBearer(auto_error=False)
 
 RE_USERNAME = re.compile(r"^[a-zA-Z0-9_.]{3,32}$")
@@ -69,11 +68,15 @@ RE_PHONE_TH = re.compile(r"^0\d{8,9}$")
 
 
 def hash_password(plain: str) -> str:
-    return pwd_ctx.hash(plain)
+    # ใช้ bcrypt ตรงๆ — passlib หยุดพัฒนาแล้วและพังกับ bcrypt 5.x
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
 
 
 def create_token(user_doc: dict) -> str:
@@ -225,7 +228,8 @@ async def login(body: LoginIn):
 
     # dummy verify เพื่อกัน timing attack (ใช้เวลาคล้ายกันแม้ไม่พบ user)
     if user is None:
-        pwd_ctx.verify(body.password, pwd_ctx.hash("dummy-verify-x"))
+        # dummy verify กัน timing attack
+        bcrypt.checkpw(b"dummy", bcrypt.hashpw(b"dummy-verify-x", bcrypt.gensalt(rounds=12)))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
 
     if not user.get("is_active", True):
