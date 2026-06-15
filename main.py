@@ -807,6 +807,105 @@ def api_calculate_two(data: TwoStageInput):
     }
 
 # =========================================================
+# QUERY ENDPOINT — แสดงข้อมูลแบบ flat 
+# =========================================================
+
+@app.get("/api/metrics/{compressor_id}/detail", tags=["metrics"])
+async def get_detail_data(
+    compressor_id: str,
+    limit: int = 100,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    _user: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    tz_th = timezone(timedelta(hours=7))
+    query = select(MetricModel).where(MetricModel.compressor_id == compressor_id)
+    if start:
+        query = query.where(MetricModel.timestamp >= start.astimezone(tz_th))
+    if end:
+        query = query.where(MetricModel.timestamp <= end.astimezone(tz_th))
+    query = query.order_by(MetricModel.timestamp.desc()).limit(limit)
+
+    result = await db.execute(query)
+    rows = result.scalars().all()
+
+    data_list = []
+    for row in rows:
+        inp = row.inputs_snapshot or {}
+        diag = row.diagnosis or {}
+        enth = diag.get("enthalpy", {})
+        systems = diag.get("systems", {})
+        alarms = diag.get("alarms", [])
+
+        data_list.append({
+            # ── Meta ──────────────────────────────
+            "id":             row.id,
+            "compressor_id":  row.compressor_id,
+            "timestamp":      row.timestamp.astimezone(tz_th).isoformat() if row.timestamp else None,
+
+            # ── Input (ค่าจาก sensor) ─────────────
+            "input": {
+                "sp_kg":                  inp.get("sp_kg"),
+                "dp_kg":                  inp.get("dp_kg"),
+                "st_c":                   inp.get("st_c"),
+                "dt_c":                   inp.get("dt_c"),
+                "liquid_temp_c":          inp.get("liquid_temp_c"),
+                "current_amp":            inp.get("current_amp"),
+                "evaporator_room_temp_c": inp.get("evaporator_room_temp_c"),
+                "condenser_temp_c":       inp.get("condenser_temp_c"),
+            },
+
+            # ── Performance (ค่าหลังคำนวณ) ────────
+            "performance": {
+                "power_kw":       diag.get("power_kw"),
+                "cop":            diag.get("cop"),
+                "q_e_kw":         diag.get("q_e_kw"),
+                "m_dot_kgh":      diag.get("m_dot_kgh"),
+                "superheat_suc":  diag.get("superheat_suc"),
+                "subcooling":     diag.get("subcooling"),
+                "pressure_ratio": diag.get("pressure_ratio"),
+            },
+
+            # ── Enthalpy ──────────────────────────
+            "enthalpy": {
+                "t_evap_c":    enth.get("t_evap_c"),
+                "t_cond_c":    enth.get("t_cond_c"),
+                "h1":          enth.get("h1"),
+                "h2":          enth.get("h2"),
+                "h2s":         enth.get("h2s"),
+                "h3":          enth.get("h3"),
+                "eta_is_pct":  enth.get("eta_is_pct"),
+                "q_l_kgkg":    enth.get("q_l_kgkg"),
+                "w_comp_kgkg": enth.get("w_comp_kgkg"),
+            },
+
+            # ── Status ────────────────────────────
+            "status": {
+                "sensor":    systems.get("sensor", {}).get("status"),
+                "sensor_text": systems.get("sensor", {}).get("text"),
+                "condenser": systems.get("condenser", {}).get("status"),
+            },
+
+            # ── Alarms ────────────────────────────
+            "alarms": [
+                {
+                    "severity": a.get("severity"),
+                    "title":    a.get("title"),
+                    "message":  a.get("message"),
+                }
+                for a in alarms
+            ],
+            "alarm_count": len(alarms),
+        })
+
+    return {
+        "compressor_id": compressor_id,
+        "count":         len(data_list),
+        "data":          data_list,
+    }
+
+# =========================================================
 # STARTUP
 # =========================================================
 
