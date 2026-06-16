@@ -19,7 +19,6 @@ from pydantic import BaseModel, EmailStr, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-import secure
 import logging
 import jwt
 
@@ -61,16 +60,16 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-secure_headers = secure.Secure(
-    csp=secure.ContentSecurityPolicy()
-        .default_src("'self'")
-        .script_src("'self'")
-        .style_src("'self'", "'unsafe-inline'"),
-    hsts=secure.StrictTransportSecurity().max_age(31536000).include_subdomains(),
-    referrer=secure.ReferrerPolicy().no_referrer(),
-    cache=secure.CacheControl().no_store(),
-    xfo=secure.XFrameOptions().deny(),
-)
+@app.middleware("http")
+async def set_secure_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    return response
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,11 +77,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-@app.middleware("http")
-async def set_secure_headers(request: Request, call_next):
-    response = await call_next(request)
-    secure_headers.framework.fastapi(response)
-    return response
+
 
 # =========================================================
 # DATABASE SETUP
