@@ -37,9 +37,15 @@ TOKEN_TTL_H  = 8
 
 # =========================================================
 # FASTAPI
-# =========================================================
+# ======================================================== 
 
-app = FastAPI(title="Ammonia Diagnostics API v2")
+IS_PROD = os.getenv("ENV", "development") == "production"
+
+app = FastAPI(
+    title="Ammonia Diagnostics API v2",
+    docs_url=None if IS_PROD else "/docs",      # ปิด Swagger ใน prod
+    redoc_url=None if IS_PROD else "/redoc",
+)
 CP.set_reference_state("Ammonia", "IIR")
 
 limiter = Limiter(key_func=get_remote_address)
@@ -63,12 +69,19 @@ app.add_middleware(
 @app.middleware("http")
 async def set_secure_headers(request: Request, call_next):
     response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Cache-Control"] = "no-store"
+    
+    # ผ่อน CSP ให้ /docs และ /redoc
+    if request.url.path in ("/docs", "/redoc", "/openapi.json"):
+        return response
+    
+    response.headers["X-Content-Type-Options"]   = "nosniff"
+    response.headers["X-Frame-Options"]           = "DENY"
+    response.headers["Referrer-Policy"]           = "no-referrer"
+    response.headers["Cache-Control"]             = "no-store"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    response.headers["Content-Security-Policy"]   = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    )
     return response
 
 logging.basicConfig(
@@ -284,11 +297,12 @@ async def login(request: Request, body: LoginIn, response: Response, db: AsyncSe
 
 
     token = create_token({"_id": user.id, "username": user.username, "role": user.role})
+
     response.set_cookie(
         key="access_token",
         value=token,
         httponly=True,
-        secure=True,
+        secure=IS_PROD,     # ← False ตอน local, True ตอน deploy
         samesite="lax",
         max_age=TOKEN_TTL_H * 3600,
         path="/",
