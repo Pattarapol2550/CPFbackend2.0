@@ -262,8 +262,9 @@ audit_logger.addHandler(handler)
 
 @app.post("/api/auth/login", tags=["auth"])
 @limiter.limit("5/minute")
-async def login(body: LoginIn, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(request: Request, body: LoginIn, response: Response, db: AsyncSession = Depends(get_db)):
     identifier = body.identifier.strip().lower()
+    client_ip = request.client.host
     result = await db.execute(
         select(UserModel).where(
             (UserModel.username_lower == identifier) |
