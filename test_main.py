@@ -13,46 +13,33 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, call
 from datetime import datetime, timezone, timedelta
 
-# ─── Patch MongoDB at import time ────────────────────────────────────────────
-import sys
-from types import ModuleType
-
-fake_motor       = ModuleType("motor")
-fake_motor_async = ModuleType("motor.motor_asyncio")
-
-class FakeCollection:
-    async def find_one(self, *a, **kw): return None
-    def find(self, *a, **kw): return self
-    def sort(self, *a, **kw): return self
-    def limit(self, *a, **kw): return self
-    async def insert_one(self, doc): return MagicMock(inserted_id="fake_id")
-    def __aiter__(self): return self
-    async def __anext__(self): raise StopAsyncIteration
-
-class FakeClient:
-    def __getattr__(self, name): return type('FakeDB', (), {'get_collection': lambda s, n: FakeCollection()})()
-
-class FakeAsyncIOMotorClient:
-    def __new__(cls, *a, **kw): return FakeClient()
-
-fake_motor_async.AsyncIOMotorClient = FakeAsyncIOMotorClient
-fake_motor.motor_asyncio = fake_motor_async
-sys.modules["motor"]                 = fake_motor
-sys.modules["motor.motor_asyncio"]   = fake_motor_async
-
 import os
-os.environ["MONGO_DETAILS"] = "mongodb://localhost:27017"
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+_engine_patcher = patch(
+    "sqlalchemy.ext.asyncio.create_async_engine",
+    return_value=MagicMock(name="test_engine"),
+)
+_engine_patcher.start()
 
 from main import (
-    safe_round, diagnose_compressor, compute_cycle_points,
-    build_saturation_dome, CompressorDataInput, app,
+    safe_round,
+    diagnose_compressor,
+    compute_cycle_points,
+    build_saturation_dome,
+    CompressorDataInput,
+    app,
 )
+from app.core.security import require_user
+from app.database import get_db
 from httpx import AsyncClient, ASGITransport
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
 def make_input(**kw):
     """สร้าง CompressorDataInput ด้วยค่าที่สมเหตุสมผล (superheated vapour region)"""
     defaults = dict(
@@ -67,22 +54,78 @@ def make_input(**kw):
     defaults.update(kw)
     return CompressorDataInput(**defaults)
 
-FAKE_DOC = {
-    "_id": MagicMock(__str__=lambda s: "64a1b2c3d4e5f6a7b8c9d0e1"),
-    "compressor_id": "COMP-01",
-    "timestamp": datetime(2025, 6, 10, 14, 25, 2, tzinfo=timezone(timedelta(hours=7))),
-    "inputs_snapshot": dict(
-        compressor_id="COMP-01", sp_kg=3.0, dp_kg=13.0,
-        st_c=3.0, dt_c=80.0, liquid_temp_c=35.0, current_amp=50.0,
+FAKE_METRIC = SimpleNamespace(
+    id=1,
+    compressor_id="COMP-01",
+    timestamp=datetime(2025, 6, 10, 14, 25, 2, tzinfo=timezone(timedelta(hours=7))),
+    inputs_snapshot=dict(
+        compressor_id="COMP-01",
+        sp_kg=3.0,
+        dp_kg=13.0,
+        st_c=3.0,
+        dt_c=80.0,
+        liquid_temp_c=35.0,
+        current_amp=50.0,
     ),
-    "diagnosis": {"cop": 3.5, "alarms": []},
-}
+    diagnosis={"cop": 3.5, "alarms": []},
+)
+
+FAKE_USER = {"username": "tester", "role": "user", "sub": "1"}
+
+
+class _FakeEngineBegin:
+    async def __aenter__(self):
+        conn = MagicMock()
+        conn.run_sync = AsyncMock()
+        return conn
+
+    async def __aexit__(self, *args):
+        return None
+
+
+@pytest.fixture(autouse=True)
+def bypass_db_startup():
+    with patch("app.database.engine.begin", return_value=_FakeEngineBegin()):
+        yield
+
+
+@pytest.fixture
+def authed_client():
+    """AsyncClient with auth + DB dependency overrides."""
+
+    async def override_require_user():
+        return FAKE_USER
+
+    mock_session = AsyncMock()
+    mock_session.commit = AsyncMock()
+    mock_session.add = MagicMock()
+
+    async def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[require_user] = override_require_user
+    app.dependency_overrides[get_db] = override_get_db
+    yield mock_session
+    app.dependency_overrides.clear()
+
+
+def _mock_scalars_result(rows):
+    result = MagicMock()
+    scalars = MagicMock()
+    scalars.all.return_value = rows
+    result.scalars.return_value = scalars
+    return result
+
+
+def _mock_scalar_result(doc):
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = doc
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. safe_round  (Statement + Branch)
 # ═══════════════════════════════════════════════════════════════════════════════
-
 class TestSafeRound:
     """Branch: value is None | float | raises"""
 
@@ -111,11 +154,9 @@ class TestSafeRound:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. diagnose_compressor — all branches
 # ═══════════════════════════════════════════════════════════════════════════════
-
 class TestDiagnoseCompressor:
 
     # ── PATH A: full measured inputs ─────────────────────────────────────────
-
     def test_path_full_measured_inputs(self):
         """sh_mode=measured, dt_mode=measured, COP+power computed"""
         d = make_input()
@@ -125,7 +166,6 @@ class TestDiagnoseCompressor:
         assert isinstance(r["cop"], float) and r["cop"] > 1.0
 
     # ── PATH B: no st_c → assumed SH=5K ──────────────────────────────────────
-
     def test_path_assumed_suction_temp(self):
         """sh_mode=assumed_5K, dt_mode=measured"""
         d = make_input(st_c=None)
@@ -134,7 +174,6 @@ class TestDiagnoseCompressor:
         assert r["modes"]["dt_mode"] == "measured"
 
     # ── PATH C: no dt_c → assumed η=0.70 ─────────────────────────────────────
-
     def test_path_assumed_discharge_temp(self):
         """sh_mode=measured, dt_mode=assumed_eta07"""
         d = make_input(dt_c=None)
@@ -143,7 +182,6 @@ class TestDiagnoseCompressor:
         assert r["modes"]["dt_mode"] == "assumed_eta07"
 
     # ── PATH D: no st_c AND no dt_c ──────────────────────────────────────────
-
     def test_path_both_assumed(self):
         """sh_mode=assumed_5K, dt_mode=assumed_eta07"""
         d = make_input(st_c=None, dt_c=None)
@@ -152,7 +190,6 @@ class TestDiagnoseCompressor:
         assert r["modes"]["dt_mode"] == "assumed_eta07"
 
     # ── Branch: sp_kg is None (line 155 False) ────────────────────────────────
-
     def test_branch_sp_kg_none(self):
         """p_suc_pa stays None → h1=None → most values are '--'"""
         # CompressorDataInput requires sp_kg as float, but we bypass via dict trick
@@ -189,7 +226,7 @@ class TestDiagnoseCompressor:
             if call_count[0] == 1:   # first call → raise to force except branch (line 518)
                 raise ValueError("simulated CoolProp failure")
             return original(*args, **kw)
-        with patch("main.CP.PropsSI", side_effect=raising_props):
+        with patch("app.services.diagnostics.CP.PropsSI", side_effect=raising_props):
             r = diagnose_compressor(d)
         assert isinstance(r, dict)  # returned default result from except branch (line 518-522)
 
@@ -324,7 +361,6 @@ class TestDiagnoseCompressor:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. compute_cycle_points — all branches & paths
 # ═══════════════════════════════════════════════════════════════════════════════
-
 class TestComputeCyclePoints:
 
     def _full(self):
@@ -404,7 +440,7 @@ class TestComputeCyclePoints:
                 return h1_val_kj * 1000
             return original(prop, p_or_t, *args)
 
-        with patch("main.CP.PropsSI", side_effect=mock_props):
+        with patch("app.services.ph_diagram.CP.PropsSI", side_effect=mock_props):
             inp = self._full()
             pts = compute_cycle_points(inp)
         # When h2 = h1 exactly, (h2 - h1_val) == 0 → efficiency not set
@@ -445,7 +481,7 @@ class TestComputeCyclePoints:
     # Branch: exception path (line 787-788) → print and return partial result
     def test_branch_exception_in_compute(self):
         import CoolProp.CoolProp as CP
-        with patch("main.CP.PropsSI", side_effect=ValueError("boom")):
+        with patch("app.services.ph_diagram.CP.PropsSI", side_effect=ValueError("boom")):
             pts = compute_cycle_points(self._full())
         assert isinstance(pts, dict)   # returns partially-filled dict
 
@@ -453,7 +489,6 @@ class TestComputeCyclePoints:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. build_saturation_dome
 # ═══════════════════════════════════════════════════════════════════════════════
-
 class TestBuildSaturationDome:
 
     def test_structure(self):
@@ -489,7 +524,7 @@ class TestBuildSaturationDome:
                     raise ValueError("fake loop error")
             return original(*args)
 
-        with patch("main.CP.PropsSI", side_effect=flaky):
+        with patch("app.services.ph_diagram.CP.PropsSI", side_effect=flaky):
             d = build_saturation_dome(n_points=8)
         assert len(d["liquid"]) > 0   # some points computed after skipping errors
 
@@ -497,237 +532,219 @@ class TestBuildSaturationDome:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. API Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
-
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
 
 # ─── POST /api/metrics ────────────────────────────────────────────────────────
-
 @pytest.mark.anyio
-async def test_post_metrics_success():
-    mock_col = AsyncMock()
-    mock_col.insert_one = AsyncMock(return_value=MagicMock(inserted_id="abc"))
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.post("/api/metrics", json=dict(
-                compressor_id="COMP-01", sp_kg=3.0, dp_kg=13.0,
-                st_c=3.0, dt_c=80.0, liquid_temp_c=35.0, current_amp=50.0,
-            ))
+async def test_post_metrics_success(authed_client):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(
+            "/api/metrics",
+            json=dict(
+                compressor_id="COMP-01",
+                sp_kg=3.0,
+                dp_kg=13.0,
+                st_c=3.0,
+                dt_c=80.0,
+                liquid_temp_c=35.0,
+                current_amp=50.0,
+            ),
+        )
     assert r.status_code == 200
     assert r.json()["status"] == "Success"
+    authed_client.add.assert_called_once()
+    authed_client.commit.assert_awaited_once()
+
 
 @pytest.mark.anyio
-async def test_post_metrics_with_explicit_timestamp():
+async def test_post_metrics_with_explicit_timestamp(authed_client):
     """covers record_time = payload.timestamp.astimezone(tz_th) branch"""
-    mock_col = AsyncMock()
-    mock_col.insert_one = AsyncMock(return_value=MagicMock(inserted_id="abc"))
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.post("/api/metrics", json=dict(
-                compressor_id="COMP-01", sp_kg=3.0, dp_kg=13.0,
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(
+            "/api/metrics",
+            json=dict(
+                compressor_id="COMP-01",
+                sp_kg=3.0,
+                dp_kg=13.0,
                 timestamp="2025-06-10T14:25:02+07:00",
-            ))
+            ),
+        )
     assert r.status_code == 200
 
+
 @pytest.mark.anyio
-async def test_post_metrics_minimal():
-    mock_col = AsyncMock()
-    mock_col.insert_one = AsyncMock(return_value=MagicMock(inserted_id="x"))
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.post("/api/metrics", json=dict(compressor_id="COMP-02", sp_kg=2.5, dp_kg=12.0))
+async def test_post_metrics_minimal(authed_client):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(
+            "/api/metrics",
+            json=dict(compressor_id="COMP-02", sp_kg=2.5, dp_kg=12.0),
+        )
     assert r.status_code == 200
+
 
 @pytest.mark.anyio
 async def test_post_metrics_missing_required_field():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        r = await c.post("/api/metrics", json=dict(compressor_id="COMP-01", sp_kg=3.0))
-    assert r.status_code == 422
+    async def override_require_user():
+        return FAKE_USER
+
+    app.dependency_overrides[require_user] = override_require_user
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            r = await c.post("/api/metrics", json=dict(compressor_id="COMP-01", sp_kg=3.0))
+        assert r.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
 
 # ─── GET /api/metrics/{compressor_id} ────────────────────────────────────────
-
-def _make_cursor(docs: list):
-    """Build a mock async-iterable cursor"""
-    async def _aiter(self):
-        for d in docs:
-            yield d
-    cursor = MagicMock()
-    cursor.sort.return_value  = cursor
-    cursor.limit.return_value = cursor
-    cursor.__aiter__ = _aiter
-    return cursor
-
 @pytest.mark.anyio
-async def test_get_metrics_returns_list():
-    doc = dict(FAKE_DOC)
-    doc["_id"] = "fake_str_id"
-    mock_col = MagicMock()
-    mock_col.find.return_value = _make_cursor([doc])
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/metrics/COMP-01")
+async def test_get_metrics_returns_list(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalars_result([FAKE_METRIC]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/metrics/COMP-01")
     assert r.status_code == 200 and isinstance(r.json(), list)
+    assert r.json()[0]["compressor_id"] == "COMP-01"
+
 
 @pytest.mark.anyio
-async def test_get_metrics_doc_without_timestamp():
-    """covers branch: 'timestamp' not in doc (line 608 False)"""
-    doc = {"_id": "abc", "compressor_id": "COMP-01"}   # no timestamp key
-    mock_col = MagicMock()
-    mock_col.find.return_value = _make_cursor([doc])
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/metrics/COMP-01")
+async def test_get_metrics_doc_without_timestamp(authed_client):
+    """covers branch: row.timestamp is None"""
+    row = SimpleNamespace(
+        id=2,
+        compressor_id="COMP-01",
+        timestamp=None,
+        inputs_snapshot={},
+        diagnosis={},
+    )
+    authed_client.execute = AsyncMock(return_value=_mock_scalars_result([row]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/metrics/COMP-01")
     assert r.status_code == 200
+    assert r.json()[0]["timestamp"] is None
+
 
 @pytest.mark.anyio
-async def test_get_metrics_empty():
-    mock_col = MagicMock()
-    mock_col.find.return_value = _make_cursor([])
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/metrics/COMP-99")
+async def test_get_metrics_empty(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalars_result([]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/metrics/COMP-99")
     assert r.status_code == 200 and r.json() == []
 
-@pytest.mark.anyio
-async def test_get_metrics_with_start_only():
-    """covers line 589 True, 591 False"""
-    mock_col = MagicMock()
-    mock_col.find.return_value = _make_cursor([])
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/metrics/COMP-01", params={"start": "2025-06-01T00:00:00Z"})
-    assert r.status_code == 200
 
 @pytest.mark.anyio
-async def test_get_metrics_with_end_only():
-    """covers line 589 True, 591 True"""
-    mock_col = MagicMock()
-    mock_col.find.return_value = _make_cursor([])
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/metrics/COMP-01", params={"end": "2025-06-30T23:59:59Z"})
+async def test_get_metrics_with_start_only(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalars_result([]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/metrics/COMP-01", params={"start": "2025-06-01T00:00:00Z"})
     assert r.status_code == 200
 
-@pytest.mark.anyio
-async def test_get_metrics_with_both_dates():
-    """covers both start and end branches"""
-    mock_col = MagicMock()
-    mock_col.find.return_value = _make_cursor([])
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/metrics/COMP-01", params={
-                "start": "2025-06-01T00:00:00Z",
-                "end":   "2025-06-30T23:59:59Z",
-            })
-    assert r.status_code == 200
 
 @pytest.mark.anyio
-async def test_get_metrics_no_date_filter():
-    """line 587: start=None and end=None → branch False"""
-    mock_col = MagicMock()
-    mock_col.find.return_value = _make_cursor([])
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/metrics/COMP-01")
+async def test_get_metrics_with_end_only(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalars_result([]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/metrics/COMP-01", params={"end": "2025-06-30T23:59:59Z"})
     assert r.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_get_metrics_with_both_dates(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalars_result([]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get(
+            "/api/metrics/COMP-01",
+            params={"start": "2025-06-01T00:00:00Z", "end": "2025-06-30T23:59:59Z"},
+        )
+    assert r.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_get_metrics_no_date_filter(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalars_result([]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/metrics/COMP-01")
+    assert r.status_code == 200
+
 
 # ─── GET /api/ph-diagram/{compressor_id} ─────────────────────────────────────
-
 @pytest.mark.anyio
-async def test_ph_diagram_latest_success():
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(return_value=FAKE_DOC)
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-01")
+async def test_ph_diagram_latest_success(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalar_result(FAKE_METRIC))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/ph-diagram/COMP-01")
     assert r.status_code == 200
     body = r.json()
     assert "saturation_dome" in body and "cycle" in body
 
+
 @pytest.mark.anyio
-async def test_ph_diagram_latest_not_found():
-    """line 861-864: doc is None after latest query → 404"""
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(return_value=None)
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-99")
+async def test_ph_diagram_latest_not_found(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalar_result(None))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/ph-diagram/COMP-99")
     assert r.status_code == 404
 
-@pytest.mark.anyio
-async def test_ph_diagram_by_timestamp_found():
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(return_value=FAKE_DOC)
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-01", params={"timestamp": "2025-06-10T14:25:02+07:00"})
-    assert r.status_code == 200
 
 @pytest.mark.anyio
-async def test_ph_diagram_by_timestamp_not_found():
-    """line 848-852: timestamp window → doc=None → 404"""
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(return_value=None)
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-01", params={"timestamp": "2025-06-10T14:25:04+07:00"})
+async def test_ph_diagram_by_timestamp_found(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalar_result(FAKE_METRIC))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get(
+            "/api/ph-diagram/COMP-01", params={"timestamp": "2025-06-10T14:25:02+07:00"}
+        )
+    assert r.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_ph_diagram_by_timestamp_not_found(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalar_result(None))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get(
+            "/api/ph-diagram/COMP-01", params={"timestamp": "2025-06-10T14:25:04+07:00"}
+        )
     assert r.status_code == 404
     assert "ไม่พบข้อมูล" in r.json()["detail"]
 
-@pytest.mark.anyio
-async def test_ph_diagram_by_record_id_valid():
-    """record_id branch with valid ObjectId format"""
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(return_value=FAKE_DOC)
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-01", params={"record_id": "64a1b2c3d4e5f6a7b8c9d0e1"})
-    assert r.status_code == 200
 
 @pytest.mark.anyio
-async def test_ph_diagram_by_record_id_invalid():
-    """line 822-830: ObjectId("bad") raises → 400"""
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(side_effect=Exception("invalid ObjectId"))
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-01", params={"record_id": "not-valid"})
+async def test_ph_diagram_by_record_id_valid(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalar_result(FAKE_METRIC))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/ph-diagram/COMP-01", params={"record_id": "1"})
+    assert r.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_ph_diagram_by_record_id_invalid(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalar_result(None))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/ph-diagram/COMP-01", params={"record_id": "not-valid"})
     assert r.status_code == 400
 
-@pytest.mark.anyio
-async def test_ph_diagram_timestamp_is_string_not_datetime():
-    """line 882: ts exists but hasattr(ts,'astimezone') is False → str(ts) branch"""
-    doc = dict(FAKE_DOC)
-    doc["timestamp"] = "2025-06-10T14:25:02"    # plain string, no astimezone
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(return_value=doc)
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-01")
-    assert r.status_code == 200
-    assert r.json()["timestamp"] == "2025-06-10T14:25:02"
 
 @pytest.mark.anyio
-async def test_ph_diagram_timestamp_none():
-    """line 882: ts is None → ts_str = None"""
-    doc = dict(FAKE_DOC)
-    doc["timestamp"] = None
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(return_value=doc)
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-01")
+async def test_ph_diagram_timestamp_none(authed_client):
+    metric = SimpleNamespace(
+        id=1,
+        compressor_id="COMP-01",
+        timestamp=None,
+        inputs_snapshot=FAKE_METRIC.inputs_snapshot,
+        diagnosis=FAKE_METRIC.diagnosis,
+    )
+    authed_client.execute = AsyncMock(return_value=_mock_scalar_result(metric))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/ph-diagram/COMP-01")
     assert r.status_code == 200
     assert r.json()["timestamp"] is None
 
+
 @pytest.mark.anyio
-async def test_ph_diagram_dome_structure():
-    mock_col = AsyncMock()
-    mock_col.find_one = AsyncMock(return_value=FAKE_DOC)
-    with patch("main.metrics_collection", mock_col):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.get("/api/ph-diagram/COMP-01")
+async def test_ph_diagram_dome_structure(authed_client):
+    authed_client.execute = AsyncMock(return_value=_mock_scalar_result(FAKE_METRIC))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.get("/api/ph-diagram/COMP-01")
     dome = r.json()["saturation_dome"]
     assert len(dome["liquid"]) > 0
     assert "h" in dome["liquid"][0] and "p" in dome["liquid"][0]
@@ -736,11 +753,11 @@ async def test_ph_diagram_dome_structure():
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. __main__ block (line 897-905)  — Statement Coverage
 # ═══════════════════════════════════════════════════════════════════════════════
-
 def test_main_block_executes():
     """Cover `if __name__ == '__main__': uvicorn.run(...)` via runpy"""
     import runpy
     import sys
+    from types import ModuleType
     # patch uvicorn.run before runpy executes the module
     fake_uvicorn = ModuleType("uvicorn")
     fake_uvicorn.run = MagicMock(return_value=None)
@@ -761,7 +778,6 @@ def test_main_block_executes():
 # ═══════════════════════════════════════════════════════════════════════════════
 # 7. Extra branch-fill tests to reach 100%
 # ═══════════════════════════════════════════════════════════════════════════════
-
 class TestDiagnoseExtraBranches:
 
     # Branch: line 155 False (sp_kg is None — not possible via model, so patch it)
@@ -834,7 +850,7 @@ class TestDiagnoseExtraBranches:
                 if q0_calls[0] == 1:
                     raise ValueError("h3 fallback error")
             return original(prop, *args)
-        with patch("main.CP.PropsSI", side_effect=raise_on_q0):
+        with patch("app.services.diagnostics.CP.PropsSI", side_effect=raise_on_q0):
             r = diagnose_compressor(d)
         assert isinstance(r, dict)  # recovered gracefully
 
@@ -855,7 +871,7 @@ class TestDiagnoseExtraBranches:
                 h_pdis_T_n[0] += 1
                 return h1_j   # h2 = h1 → diff=0
             return original(prop, *args)
-        with patch("main.CP.PropsSI", side_effect=mock):
+        with patch("app.services.diagnostics.CP.PropsSI", side_effect=mock):
             r = diagnose_compressor(make_input())
         assert r["cop"] == "--"
 
@@ -891,7 +907,7 @@ class TestDiagnoseExtraBranches:
                     raise ValueError("loop error")
             return original(prop, *args)
 
-        with patch("main.CP.PropsSI", side_effect=flaky_in_loop):
+        with patch("app.services.ph_diagram.CP.PropsSI", side_effect=flaky_in_loop):
             d = build_saturation_dome(n_points=10)
         assert isinstance(d, dict)
         assert len(d["liquid"]) > 0
@@ -901,7 +917,6 @@ class TestDiagnoseExtraBranches:
 class TestFinalBranches:
 
     # Line 284: alarms.append for Low COP — need COP < 1.5 reliably
-
     def test_saturation_dome_except_continue_direct(self):
         """Patch H-computation inside T-loop to raise → except:continue fired"""
         import CoolProp.CoolProp as CP
@@ -919,7 +934,7 @@ class TestFinalBranches:
                     raise ValueError("force except:continue")
             return original(prop, *args)
 
-        with patch("main.CP.PropsSI", side_effect=fail_first_loop_iter):
+        with patch("app.services.ph_diagram.CP.PropsSI", side_effect=fail_first_loop_iter):
             dome = build_saturation_dome(n_points=15)
         assert len(dome["liquid"]) > 0  # continued past exception
 
@@ -939,3 +954,105 @@ class TestLowCOPReliable:
         assert cop < 1.5, f"Expected COP < 1.5, got {cop}"
         titles = [a["title"] for a in r.get("alarms", [])]
         assert "Low COP" in titles   # line 284 executed ✓
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cookie auth
+# ─────────────────────────────────────────────────────────────────────────────
+class TestCookieAuth:
+
+    BASE_URL = "https://test"
+
+    @pytest.fixture
+    def auth_db_client(self):
+        from app.core.security import hash_password
+
+        fake_user = SimpleNamespace(
+            id=1,
+            username="operator1",
+            username_lower="operator1",
+            email="op@example.com",
+            password_hash=hash_password("SecurePass1"),
+            role="user",
+            is_active="true",
+        )
+
+        mock_session = AsyncMock()
+        mock_session.commit = AsyncMock()
+        mock_session.add = MagicMock()
+        mock_session.execute = AsyncMock(return_value=_mock_scalar_result(fake_user))
+
+        async def override_get_db():
+            yield mock_session
+
+        app.dependency_overrides[get_db] = override_get_db
+        yield mock_session
+        app.dependency_overrides.clear()
+
+    @pytest.mark.anyio
+    async def test_login_sets_http_only_cookie(self, auth_db_client):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            r = await client.post(
+                "/api/auth/login",
+                json={"identifier": "operator1", "password": "SecurePass1"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert "access_token" not in body
+        assert body["user"]["username"] == "operator1"
+
+        set_cookie = r.headers.get("set-cookie", "")
+        assert "access_token=" in set_cookie
+        assert "httponly" in set_cookie.lower()
+        assert "samesite=none" in set_cookie.lower()
+        assert "secure" in set_cookie.lower()
+
+    @pytest.mark.anyio
+    async def test_me_with_cookie(self, auth_db_client):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            await client.post(
+                "/api/auth/login",
+                json={"identifier": "operator1", "password": "SecurePass1"},
+            )
+            r = await client.get("/api/auth/me")
+        assert r.status_code == 200
+        assert r.json()["username"] == "operator1"
+
+    @pytest.mark.anyio
+    async def test_me_without_cookie_returns_401(self):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            r = await client.get("/api/auth/me")
+        assert r.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_logout_clears_cookie(self, auth_db_client):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            await client.post(
+                "/api/auth/login",
+                json={"identifier": "operator1", "password": "SecurePass1"},
+            )
+            logout = await client.post("/api/auth/logout")
+            me = await client.get("/api/auth/me")
+        assert logout.status_code == 200
+        assert logout.json()["ok"] is True
+        set_cookie = logout.headers.get("set-cookie", "").lower()
+        assert "access_token=" in set_cookie
+        assert "max-age=0" in set_cookie or "expires=" in set_cookie
+        assert me.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_cors_preflight_allows_credentials(self):
+        from app.config import CORS_ORIGINS
+
+        origin = CORS_ORIGINS[0]
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            r = await client.options(
+                "/api/auth/me",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+        assert r.status_code == 200
+        assert r.headers.get("access-control-allow-credentials") == "true"
+        assert r.headers.get("access-control-allow-origin") == origin
