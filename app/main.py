@@ -5,6 +5,8 @@ Creates the app, registers CORS, includes all routers, and runs DB migrations on
 Imported by root main.py shim for `uvicorn main:app`.
 """
 
+from contextlib import asynccontextmanager
+
 import CoolProp.CoolProp as CP
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,9 +20,18 @@ from app.routers import auth, calculator, metrics, ph_diagram
 CP.set_reference_state("Ammonia", "IIR")
 
 
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Create DB tables on startup via async lifespan handler."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("✅ PostgreSQL tables ready")
+    yield
+
+
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application."""
-    application = FastAPI(title="Ammonia Diagnostics API v2")
+    application = FastAPI(title="Ammonia Diagnostics API v2", lifespan=lifespan)
 
     application.add_middleware(
         CORSMiddleware,
@@ -34,12 +45,6 @@ def create_app() -> FastAPI:
     application.include_router(metrics.router)
     application.include_router(ph_diagram.router)
     application.include_router(calculator.router)
-
-    @application.on_event("startup")
-    async def create_tables():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        print("✅ PostgreSQL tables ready")
 
     return application
 

@@ -157,7 +157,6 @@ class TestSafeRound:
 class TestDiagnoseCompressor:
 
     # ── PATH A: full measured inputs ─────────────────────────────────────────
-
     def test_path_full_measured_inputs(self):
         """sh_mode=measured, dt_mode=measured, COP+power computed"""
         d = make_input()
@@ -167,7 +166,6 @@ class TestDiagnoseCompressor:
         assert isinstance(r["cop"], float) and r["cop"] > 1.0
 
     # ── PATH B: no st_c → assumed SH=5K ──────────────────────────────────────
-
     def test_path_assumed_suction_temp(self):
         """sh_mode=assumed_5K, dt_mode=measured"""
         d = make_input(st_c=None)
@@ -176,7 +174,6 @@ class TestDiagnoseCompressor:
         assert r["modes"]["dt_mode"] == "measured"
 
     # ── PATH C: no dt_c → assumed η=0.70 ─────────────────────────────────────
-
     def test_path_assumed_discharge_temp(self):
         """sh_mode=measured, dt_mode=assumed_eta07"""
         d = make_input(dt_c=None)
@@ -185,7 +182,6 @@ class TestDiagnoseCompressor:
         assert r["modes"]["dt_mode"] == "assumed_eta07"
 
     # ── PATH D: no st_c AND no dt_c ──────────────────────────────────────────
-
     def test_path_both_assumed(self):
         """sh_mode=assumed_5K, dt_mode=assumed_eta07"""
         d = make_input(st_c=None, dt_c=None)
@@ -194,7 +190,6 @@ class TestDiagnoseCompressor:
         assert r["modes"]["dt_mode"] == "assumed_eta07"
 
     # ── Branch: sp_kg is None (line 155 False) ────────────────────────────────
-
     def test_branch_sp_kg_none(self):
         """p_suc_pa stays None → h1=None → most values are '--'"""
         # CompressorDataInput requires sp_kg as float, but we bypass via dict trick
