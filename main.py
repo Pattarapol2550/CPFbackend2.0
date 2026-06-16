@@ -3,11 +3,11 @@ import os
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-
 import numpy as np
 from dotenv import load_dotenv
 import CoolProp.CoolProp as CP
-from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi import FastAPI, HTTPException, status, Depends,Response,Request,Cookie
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -16,6 +16,11 @@ from sqlalchemy import Column, String, DateTime, JSON, Integer
 from sqlalchemy.future import select
 import bcrypt
 from pydantic import BaseModel, EmailStr, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import secure
+import logging
 import jwt
 
 # =========================================================
@@ -25,7 +30,9 @@ import jwt
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-JWT_SECRET   = os.getenv("JWT_SECRET", "change-me-in-production-use-strong-secret")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET ไม่ได้ตั้งค่าใน .env — ห้ามรัน production โดยไม่มี secret")
 JWT_ALGO     = "HS256"
 TOKEN_TTL_H  = 8
 
@@ -36,13 +43,46 @@ TOKEN_TTL_H  = 8
 app = FastAPI(title="Ammonia Diagnostics API v2")
 CP.set_reference_state("Ammonia", "IIR")
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+secure_headers = secure.Secure(
+    csp=secure.ContentSecurityPolicy()
+        .default_src("'self'")
+        .script_src("'self'")
+        .style_src("'self'", "'unsafe-inline'"),
+    hsts=secure.StrictTransportSecurity().max_age(31536000).include_subdomains(),
+    referrer=secure.ReferrerPolicy().no_referrer(),
+    cache=secure.CacheControl().no_store(),
+    xfo=secure.XFrameOptions().deny(),
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+@app.middleware("http")
+async def set_secure_headers(request: Request, call_next):
+    response = await call_next(request)
+    secure_headers.framework.fastapi(response)
+    return response
 
 # =========================================================
 # DATABASE SETUP
@@ -115,10 +155,12 @@ def decode_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token ไม่ถูกต้อง")
 
-async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
-    if creds is None:
+async def get_current_user(
+    access_token: str | None = Cookie(default=None)
+) -> dict:
+    if access_token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="กรุณา login ก่อน")
-    return decode_token(creds.credentials)
+    return decode_token(access_token)
 
 async def require_admin(current: dict = Depends(get_current_user)) -> dict:
     if current.get("role") != "admin":
@@ -210,8 +252,17 @@ async def register(body: RegisterIn, db: AsyncSession = Depends(get_db)):
     await db.commit()
     return {"ok": True, "message": "สมัครสมาชิกสำเร็จ"}
 
+
+audit_logger = logging.getLogger("audit")
+audit_logger.setLevel(logging.INFO)
+
+handler = logging.FileHandler("audit.log")
+handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+audit_logger.addHandler(handler)
+
 @app.post("/api/auth/login", tags=["auth"])
-async def login(body: LoginIn, db: AsyncSession = Depends(get_db)):
+@limiter.limit("5/minute")
+async def login(body: LoginIn, response: Response, db: AsyncSession = Depends(get_db)):
     identifier = body.identifier.strip().lower()
     result = await db.execute(
         select(UserModel).where(
@@ -221,19 +272,35 @@ async def login(body: LoginIn, db: AsyncSession = Depends(get_db)):
     )
     user = result.scalar_one_or_none()
 
-    if user is None:
-        bcrypt.checkpw(b"dummy", bcrypt.hashpw(b"dummy", bcrypt.gensalt(rounds=12)))
+    if user is None or not verify_password(body.password, user.password_hash):
+        # ✅ log failed attempt
+        audit_logger.warning(f"LOGIN_FAIL ip={client_ip} identifier={identifier}")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
 
     if user.is_active != "true":
+        audit_logger.warning(f"LOGIN_BLOCKED ip={client_ip} user={user.username}")
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="บัญชีนี้ถูกระงับการใช้งาน")
 
-    if not verify_password(body.password, user.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
+    # if not verify_password(body.password, user.password_hash):
+    #     raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
+    
+    audit_logger.info(f"LOGIN_OK ip={client_ip} user={user.username} role={user.role}")
+
 
     token = create_token({"_id": user.id, "username": user.username, "role": user.role})
-    return {"access_token": token, "token_type": "bearer",
-            "user": {"username": user.username, "role": user.role}}
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=TOKEN_TTL_H * 3600,
+        path="/",
+    )
+    return {
+        "ok": True,
+        "user": {"username": user.username, "role": user.role}
+    }
 
 @app.get("/api/auth/me", tags=["auth"])
 async def get_me(current: dict = Depends(require_user)):
@@ -272,6 +339,8 @@ async def admin_create_user(
     await db.commit()
     return {"ok": True, "message": f"สร้าง user '{body.username}' (role: {body.role}) สำเร็จ"}
 
+    
+
 @app.get("/api/auth/admin/users", tags=["auth"])
 async def admin_list_users(
     _admin: dict = Depends(require_admin),
@@ -288,6 +357,10 @@ async def admin_list_users(
         for u in users
     ]
 
+@app.post("/api/auth/logout", tags=["auth"])
+async def logout(response: Response):
+    response.delete_cookie(key="access_token", path="/")
+    return {"ok": True}
 # =========================================================
 # DATA MODEL
 # =========================================================
@@ -433,7 +506,7 @@ def diagnose_compressor(data: CompressorDataInput):
         })
         return result
     except Exception as e:
-        print("ERROR =", e)
+        logger.error("Diagnostic error: %s", e, exc_info=True)
         return result
 
 # =========================================================
@@ -573,7 +646,7 @@ def compute_cycle_points(inputs: dict, fluid: str = "Ammonia") -> dict:
             if p_suc_pa:
                 points["point4"] = {"h": round(h3,2), "p": round(p_suc_pa/1e6,4), "label": "4 — Evap. inlet"}
     except Exception as e:
-        print("P-H compute error:", e)
+        logger.error("P-H compute error: %s", e, exc_info=True)
     return points
 
 @app.get("/api/ph-diagram/{compressor_id}", tags=["ph-diagram"])
@@ -913,7 +986,7 @@ async def get_detail_data(
 async def create_tables():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    print("✅ PostgreSQL tables ready")
+    logger.info("PostgreSQL tables ready")
 
 if __name__ == "__main__":
     import uvicorn
