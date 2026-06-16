@@ -13,9 +13,6 @@ from typing import Optional
 
 resend.api_key = RESEND_API_KEY
 logger = logging.getLogger(__name__)
-audit_logger = _setup_audit_logger()
-
-
 def _setup_audit_logger() -> logging.Logger:
     log = logging.getLogger("audit")
     log.setLevel(logging.INFO)
@@ -23,6 +20,9 @@ def _setup_audit_logger() -> logging.Logger:
     handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     log.addHandler(handler)
     return log
+audit_logger = _setup_audit_logger()
+
+
 
 
 # ── Password ───────────────────────────────────────────────
