@@ -954,3 +954,105 @@ class TestLowCOPReliable:
         assert cop < 1.5, f"Expected COP < 1.5, got {cop}"
         titles = [a["title"] for a in r.get("alarms", [])]
         assert "Low COP" in titles   # line 284 executed ✓
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cookie auth
+# ─────────────────────────────────────────────────────────────────────────────
+class TestCookieAuth:
+
+    BASE_URL = "https://test"
+
+    @pytest.fixture
+    def auth_db_client(self):
+        from app.core.security import hash_password
+
+        fake_user = SimpleNamespace(
+            id=1,
+            username="operator1",
+            username_lower="operator1",
+            email="op@example.com",
+            password_hash=hash_password("SecurePass1"),
+            role="user",
+            is_active="true",
+        )
+
+        mock_session = AsyncMock()
+        mock_session.commit = AsyncMock()
+        mock_session.add = MagicMock()
+        mock_session.execute = AsyncMock(return_value=_mock_scalar_result(fake_user))
+
+        async def override_get_db():
+            yield mock_session
+
+        app.dependency_overrides[get_db] = override_get_db
+        yield mock_session
+        app.dependency_overrides.clear()
+
+    @pytest.mark.anyio
+    async def test_login_sets_http_only_cookie(self, auth_db_client):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            r = await client.post(
+                "/api/auth/login",
+                json={"identifier": "operator1", "password": "SecurePass1"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert "access_token" not in body
+        assert body["user"]["username"] == "operator1"
+
+        set_cookie = r.headers.get("set-cookie", "")
+        assert "access_token=" in set_cookie
+        assert "httponly" in set_cookie.lower()
+        assert "samesite=none" in set_cookie.lower()
+        assert "secure" in set_cookie.lower()
+
+    @pytest.mark.anyio
+    async def test_me_with_cookie(self, auth_db_client):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            await client.post(
+                "/api/auth/login",
+                json={"identifier": "operator1", "password": "SecurePass1"},
+            )
+            r = await client.get("/api/auth/me")
+        assert r.status_code == 200
+        assert r.json()["username"] == "operator1"
+
+    @pytest.mark.anyio
+    async def test_me_without_cookie_returns_401(self):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            r = await client.get("/api/auth/me")
+        assert r.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_logout_clears_cookie(self, auth_db_client):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            await client.post(
+                "/api/auth/login",
+                json={"identifier": "operator1", "password": "SecurePass1"},
+            )
+            logout = await client.post("/api/auth/logout")
+            me = await client.get("/api/auth/me")
+        assert logout.status_code == 200
+        assert logout.json()["ok"] is True
+        set_cookie = logout.headers.get("set-cookie", "").lower()
+        assert "access_token=" in set_cookie
+        assert "max-age=0" in set_cookie or "expires=" in set_cookie
+        assert me.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_cors_preflight_allows_credentials(self):
+        from app.config import CORS_ORIGINS
+
+        origin = CORS_ORIGINS[0]
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=self.BASE_URL) as client:
+            r = await client.options(
+                "/api/auth/me",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+        assert r.status_code == 200
+        assert r.headers.get("access-control-allow-credentials") == "true"
+        assert r.headers.get("access-control-allow-origin") == origin

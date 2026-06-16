@@ -8,15 +8,19 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, HTTPException, Request, Response, status
 
-from app.config import JWT_ALGO, JWT_SECRET, TOKEN_TTL_H
-
-# =========================================================
-# Bearer scheme
-# =========================================================
-bearer = HTTPBearer(auto_error=False)
+from app.config import (
+    AUTH_COOKIE_HTTPONLY,
+    AUTH_COOKIE_MAX_AGE,
+    AUTH_COOKIE_NAME,
+    AUTH_COOKIE_PATH,
+    AUTH_COOKIE_SAMESITE,
+    AUTH_COOKIE_SECURE,
+    JWT_ALGO,
+    JWT_SECRET,
+    TOKEN_TTL_H,
+)
 
 # =========================================================
 # Password
@@ -59,13 +63,40 @@ def decode_token(token: str) -> dict:
 
 
 # =========================================================
+# Cookie helpers
+# =========================================================
+def set_auth_cookie(response: Response, token: str) -> None:
+    """Set the HttpOnly auth cookie on the response."""
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=AUTH_COOKIE_MAX_AGE,
+        httponly=AUTH_COOKIE_HTTPONLY,
+        secure=AUTH_COOKIE_SECURE,
+        samesite=AUTH_COOKIE_SAMESITE,
+        path=AUTH_COOKIE_PATH,
+    )
+
+def clear_auth_cookie(response: Response) -> None:
+    """Remove the auth cookie from the client."""
+    response.delete_cookie(
+        key=AUTH_COOKIE_NAME,
+        path=AUTH_COOKIE_PATH,
+        httponly=AUTH_COOKIE_HTTPONLY,
+        secure=AUTH_COOKIE_SECURE,
+        samesite=AUTH_COOKIE_SAMESITE,
+    )
+
+
+# =========================================================
 # Dependencies
 # =========================================================
-async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
-    """Extract and decode Bearer token from Authorization header."""
-    if creds is None:
+async def get_current_user(request: Request) -> dict:
+    """Extract and decode JWT from the auth cookie."""
+    token = request.cookies.get(AUTH_COOKIE_NAME)
+    if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="กรุณา login ก่อน")
-    return decode_token(creds.credentials)
+    return decode_token(token)
 
 async def require_admin(current: dict = Depends(get_current_user)) -> dict:
     """Require authenticated user with admin role."""

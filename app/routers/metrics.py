@@ -21,9 +21,6 @@ from app.services.diagnostics import diagnose_compressor
 router = APIRouter()
 
 
-# =========================================================
-# Helpers
-# =========================================================
 def _serialize_detail_row(row: MetricModel, tz_th) -> dict:
     """Build flat detail dict for one MetricModel row."""
     inp = row.inputs_snapshot or {}
@@ -99,7 +96,7 @@ async def save_data(
     record = MetricModel(
         compressor_id=payload.compressor_id,
         timestamp=record_time,
-        inputs_snapshot=payload.model_dump(),
+        inputs_snapshot=payload.model_dump(mode="json"),
         diagnosis=diag,
     )
     db.add(record)

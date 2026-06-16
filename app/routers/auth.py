@@ -7,15 +7,17 @@ Uses UserModel via SQLAlchemy and security helpers for JWT.
 from datetime import datetime, timezone
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.security import (
+    clear_auth_cookie,
     create_token,
     hash_password,
     require_admin,
     require_user,
+    set_auth_cookie,
     verify_password,
 )
 from app.database import get_db
@@ -72,7 +74,7 @@ async def register(body: RegisterIn, db: AsyncSession = Depends(get_db)):
 # POST /api/auth/login
 # =========================================================
 @router.post("/api/auth/login", tags=["auth"])
-async def login(body: LoginIn, db: AsyncSession = Depends(get_db)):
+async def login(body: LoginIn, response: Response, db: AsyncSession = Depends(get_db)):
     identifier = body.identifier.strip().lower()
     result = await db.execute(
         select(UserModel).where(
@@ -96,11 +98,17 @@ async def login(body: LoginIn, db: AsyncSession = Depends(get_db)):
         )
 
     token = create_token({"_id": user.id, "username": user.username, "role": user.role})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {"username": user.username, "role": user.role},
-    }
+    set_auth_cookie(response, token)
+    return {"user": {"username": user.username, "role": user.role}}
+
+
+# =========================================================
+# POST /api/auth/logout
+# =========================================================
+@router.post("/api/auth/logout", tags=["auth"])
+async def logout(response: Response):
+    clear_auth_cookie(response)
+    return {"ok": True}
 
 
 # =========================================================

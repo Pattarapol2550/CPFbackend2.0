@@ -29,7 +29,7 @@ REST API สำหรับวิเคราะห์ประสิทธิ�
 | Framework | FastAPI |
 | Thermodynamics | CoolProp (Ammonia, IIR reference state) |
 | Database | PostgreSQL via SQLAlchemy 2.x async + asyncpg |
-| Authentication | PyJWT + bcrypt + HTTP Bearer |
+| Authentication | PyJWT + bcrypt + HttpOnly cookie |
 | Validation | Pydantic v2 (`EmailStr`, `field_validator`) |
 | Numerics | NumPy |
 | Server | Uvicorn |
@@ -50,12 +50,12 @@ CPFbackend2.0/
 │
 └── app/
     ├── main.py              # FastAPI factory (create_app), CORS, router registration, startup
-    ├── config.py            # DATABASE_URL, JWT_SECRET, TOKEN_TTL from .env
+    ├── config.py            # DATABASE_URL, JWT, CORS_ORIGINS, auth cookie settings from .env
     ├── database.py          # Async engine, session factory, get_db dependency
     │
     ├── core/
     │   ├── constants.py     # FLUID, TZ_TH, validation regex, electrical defaults
-    │   └── security.py      # bcrypt, JWT, require_user / require_admin dependencies
+    │   └── security.py      # bcrypt, JWT, cookie auth, require_user / require_admin
     │
     ├── models/
     │   ├── user.py          # UserModel → table `users`
@@ -111,7 +111,7 @@ Client (Frontend / IoT / Swagger)
 
 ### Request flow — metrics (core domain)
 
-1. Client sends `POST /api/metrics` with Bearer token
+1. Client sends `POST /api/metrics` with auth cookie (`credentials: include`)
 2. `diagnose_compressor()` runs CoolProp calculations and builds alarms
 3. Record saved to `compressor_data` (inputs + diagnosis as JSON)
 4. Analysis returned immediately
@@ -119,9 +119,10 @@ Client (Frontend / IoT / Swagger)
 ### Authentication flow
 
 1. `POST /api/auth/register` or admin `POST /api/auth/admin/create-user`
-2. `POST /api/auth/login` → returns JWT (8-hour TTL)
-3. Protected routes require header: `Authorization: Bearer <token>`
-4. Admin routes additionally require `role: admin` in the token
+2. `POST /api/auth/login` → sets HttpOnly JWT cookie (8-hour TTL); JSON returns user profile only
+3. Protected routes read JWT from the `access_token` cookie (browser sends it automatically)
+4. `POST /api/auth/logout` clears the cookie
+5. Admin routes additionally require `role: admin` in the token
 
 ---
 
@@ -157,12 +158,30 @@ DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/ammonia_db
 
 # JWT signing secret — use a long random string in production
 JWT_SECRET=change-me-in-production-use-strong-secret
+
+# CORS — comma-separated frontend origins (required for cookie auth)
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+
+# Auth cookie (optional — defaults shown)
+AUTH_COOKIE_NAME=access_token
+AUTH_COOKIE_SAMESITE=none
+AUTH_COOKIE_SECURE=true
+AUTH_COOKIE_HTTPONLY=true
+AUTH_COOKIE_PATH=/
+AUTH_COOKIE_MAX_AGE=28800
 ```
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | ✅ | Async SQLAlchemy URL (`postgresql+asyncpg://...`) |
 | `JWT_SECRET` | ✅ (prod) | HMAC secret for JWT; defaults to insecure placeholder if unset |
+| `CORS_ORIGINS` | ✅ | Comma-separated allowed frontend origins; must match the browser origin exactly when using `credentials: include` |
+| `AUTH_COOKIE_NAME` | ❌ | Cookie name for JWT (default: `access_token`) |
+| `AUTH_COOKIE_SAMESITE` | ❌ | Cookie SameSite policy (default: `none` for cross-origin dev) |
+| `AUTH_COOKIE_SECURE` | ❌ | Set `Secure` flag on cookie (default: `true`; required when SameSite is `none`) |
+| `AUTH_COOKIE_HTTPONLY` | ❌ | Prevent JavaScript access to token (default: `true`) |
+| `AUTH_COOKIE_PATH` | ❌ | Cookie path (default: `/`) |
+| `AUTH_COOKIE_MAX_AGE` | ❌ | Cookie lifetime in seconds (default: `28800` = 8 h, matches JWT TTL) |
 
 > Tables are created automatically on startup via `Base.metadata.create_all`. For production schema changes, consider adding Alembic migrations.
 
@@ -192,7 +211,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 - **Build:** `pip install -r requirements.txt`
 - **Start:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
-- **Env vars:** `DATABASE_URL`, `JWT_SECRET` (set manually in Render dashboard)
+- **Env vars:** `DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGINS` (set manually in Render dashboard)
 
 ---
 
@@ -203,7 +222,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/api/auth/register` | — | Self-registration (`role=user`) |
-| POST | `/api/auth/login` | — | Login by username or email → JWT |
+| POST | `/api/auth/login` | — | Login by username or email → sets HttpOnly JWT cookie |
+| POST | `/api/auth/logout` | — | Clears auth cookie |
 | GET | `/api/auth/me` | User | Current user profile |
 | POST | `/api/auth/admin/create-user` | Admin | Create user with chosen role |
 | GET | `/api/auth/admin/users` | Admin | List users (max 500) |
@@ -252,15 +272,57 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ```json
 {
-  "access_token": "<jwt>",
-  "token_type": "bearer",
   "user": { "username": "operator1", "role": "user" }
 }
 ```
 
+The JWT is **not** returned in the JSON body. It is set as an HttpOnly cookie:
+
+```
+Set-Cookie: access_token=<jwt>; HttpOnly; Secure; SameSite=none; Path=/; Max-Age=28800
+```
+
+Clients must send `credentials: 'include'` (fetch) or `withCredentials: true` (axios) on every request so the browser attaches the cookie.
+
+#### `POST /api/auth/logout`
+
+Clears the auth cookie. No request body required.
+
+**Response (200):**
+
+```json
+{ "ok": true }
+```
+
 ---
 
-### Metrics (`/api/metrics`) — requires Bearer token
+### Frontend integration (cookie auth)
+
+1. Remove any `Authorization: Bearer ...` header logic and token storage (`localStorage` / `sessionStorage`).
+2. Enable credentials on all API calls:
+
+```javascript
+// fetch
+fetch(`${API_URL}/api/metrics`, {
+  method: "POST",
+  credentials: "include",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(payload),
+});
+
+// axios
+axios.defaults.withCredentials = true;
+```
+
+3. **Login:** `POST /api/auth/login` with credentials → use `response.user` for UI state only.
+4. **Logout:** `POST /api/auth/logout` with credentials → clear local UI auth state.
+5. **Session check:** `GET /api/auth/me` with credentials on app load (401 → redirect to login).
+
+> **Cross-origin dev:** When frontend (e.g. `localhost:5173`) and backend (`localhost:8000`) are on different origins, set `CORS_ORIGINS` to the exact frontend URL and keep `AUTH_COOKIE_SAMESITE=none` with `AUTH_COOKIE_SECURE=true`.
+
+---
+
+### Metrics (`/api/metrics`) — requires auth cookie
 
 #### `POST /api/metrics` — บันทึกข้อมูลและวิเคราะห์
 
@@ -342,8 +404,10 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ```
 GET /api/metrics/COMP-01?limit=100&start=2025-01-01T00:00:00%2B07:00
-Authorization: Bearer <token>
+Cookie: access_token=<jwt>
 ```
+
+(Browser clients send the cookie automatically when `credentials: include` is set.)
 
 Returns an array of records with `_id`, `compressor_id`, `timestamp`, `inputs_snapshot`, `diagnosis`.
 
@@ -355,7 +419,7 @@ Returns structured rows grouped into `input`, `performance`, `enthalpy`, `status
 
 ---
 
-### P-H Diagram (`/api/ph-diagram`) — requires Bearer token
+### P-H Diagram (`/api/ph-diagram`) — requires auth cookie
 
 #### `GET /api/ph-diagram/{compressor_id}`
 
@@ -590,6 +654,7 @@ python -m pytest test_main.py --cov=app --cov=main --cov-branch --cov-report=ter
 | `TestBuildSaturationDome` | Dome structure and error recovery |
 | HTTP `/api/metrics` | POST save, GET list, date filters (with auth mock) |
 | HTTP `/api/ph-diagram` | Latest, by timestamp, by record_id, 404/400 |
+| `TestCookieAuth` | Login cookie flags, `/me` with/without cookie, logout, CORS preflight |
 | `TestDiagnoseExtraBranches` | Additional branch coverage for edge thermo paths |
 
 HTTP tests use an `authed_client` fixture that overrides `require_user` and `get_db` — no real PostgreSQL connection required.
@@ -603,7 +668,7 @@ HTTP tests use an `authed_client` fixture that overrides `require_user` and `get
 | 200 | Success |
 | 201 | User registered / created |
 | 400 | Invalid `record_id` on P-H diagram |
-| 401 | Missing/invalid/expired JWT, wrong password |
+| 401 | Missing/invalid/expired auth cookie, wrong password |
 | 403 | Account suspended, or non-admin on admin route |
 | 404 | No compressor data found |
 | 409 | Username or email already taken |

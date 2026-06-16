@@ -11,6 +11,7 @@ import CoolProp.CoolProp as CP
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import CORS_ORIGINS
 from app.database import Base, engine
 from app.routers import auth, calculator, metrics, ph_diagram
 
@@ -35,7 +36,7 @@ def create_app() -> FastAPI:
 
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=CORS_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
