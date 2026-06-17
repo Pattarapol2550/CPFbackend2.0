@@ -1,16 +1,25 @@
 """
-Authentication endpoints: register, login, me, admin user management.
+app/routers/auth.py
 
-Uses UserModel via SQLAlchemy and security helpers for JWT.
+เปลี่ยน: ทุกคนที่ login ผ่าน Google ได้ role=user เสมอ
+ไม่มี auto-admin จาก domain อีกต่อไป
+admin ต้องเปลี่ยนผ่าน DB หรือ admin panel เท่านั้น
 """
 
+import base64
+import json
+import logging
+import re
 from datetime import datetime, timezone
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from app.config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+from app.core.limiter import limiter
 from app.core.security import (
     clear_auth_cookie,
     create_token,
@@ -22,60 +31,133 @@ from app.core.security import (
 )
 from app.database import get_db
 from app.models.user import UserModel
-from app.schemas.auth import AdminCreateUserIn, LoginIn, RegisterIn
+from app.schemas.auth import AdminCreateUserIn, GoogleCallbackIn, LoginIn, RegisterIn
 
 router = APIRouter()
+audit  = logging.getLogger("audit")
 
 
-# =========================================================
-# Helpers
-# =========================================================
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _safe_username(display_name: str, fallback: str) -> str:
+    """แปลง Google display name → valid username 3-32 ตัว"""
+    clean = re.sub(r"[^a-zA-Z0-9_.]", "_", display_name)[:32]
+    if len(clean) < 3:
+        clean = re.sub(r"[^a-zA-Z0-9_.]", "_", fallback.split("@")[0])[:32]
+    return clean or "user___"
+
+
+def _decode_jwt_payload(token: str) -> dict:
+    """Decode JWT payload โดยไม่ verify — ปลอดภัยเพราะได้จาก Google server-to-server"""
+    payload = token.split(".")[1]
+    payload += "=" * (4 - len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
+
+
+async def _find_or_create_google_user(
+    db: AsyncSession,
+    email: str,
+    google_id: str,
+    name: str,
+    client_ip: str,
+) -> UserModel:
+    """หา user ใน DB ด้วย google_id → email → สร้างใหม่ role=user เสมอ"""
+
+    # 1. หาด้วย google_id
+    result = await db.execute(
+        select(UserModel).where(UserModel.google_id == google_id)
+    )
+    user = result.scalar_one_or_none()
+
+    # 2. หาด้วย email (user ที่เคยสมัครผ่าน email ก่อน)
+    if user is None:
+        result = await db.execute(
+            select(UserModel).where(UserModel.email == email)
+        )
+        user = result.scalar_one_or_none()
+        if user:
+            user.google_id     = google_id
+            user.auth_provider = "google"
+            await db.commit()
+            await db.refresh(user)
+
+    # 3. สร้างใหม่ — role=user เสมอ ไม่มี auto-admin
+    if user is None:
+        username = _safe_username(name, email)
+
+        dup = await db.execute(
+            select(UserModel).where(UserModel.username_lower == username.lower())
+        )
+        if dup.scalar_one_or_none():
+            username = (username[:28] + "_" + google_id[-3:])[:32]
+
+        user = UserModel(
+            username=username,
+            username_lower=username.lower(),
+            email=email,
+            phone=None,
+            password_hash="",
+            auth_provider="google",
+            google_id=google_id,
+            role="user",               # ← user เสมอ ไม่ว่าจะ email domain ไหน
+            created_at=datetime.now(timezone.utc),
+            is_active=True,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        audit.info("GOOGLE_REGISTER ip=%s email=%s role=user", client_ip, email)
+
+    return user
+
+
 async def _create_user(db: AsyncSession, body: RegisterIn, role: str) -> UserModel:
-    """Insert a new user after duplicate check; shared by register and admin create."""
     uname_lower = body.username.lower()
     email_lower = body.email.lower()
-
     result = await db.execute(
         select(UserModel).where(
             (UserModel.username_lower == uname_lower) | (UserModel.email == email_lower)
         )
     )
     if result.scalar_one_or_none():
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, detail="ชื่อผู้ใช้หรืออีเมลนี้ถูกใช้งานแล้ว"
-        )
-
-    now = datetime.now(timezone.utc)
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="ชื่อผู้ใช้หรืออีเมลนี้ถูกใช้งานแล้ว")
     user = UserModel(
         username=body.username,
         username_lower=uname_lower,
         email=email_lower,
         phone=body.phone,
         password_hash=hash_password(body.password),
+        auth_provider="local",
         role=role,
-        created_at=now,
-        is_active="true",
+        created_at=datetime.now(timezone.utc),
+        is_active=True,
     )
     db.add(user)
     await db.commit()
     return user
 
 
-# =========================================================
-# POST /api/auth/register
-# =========================================================
+# ── POST /api/auth/register ───────────────────────────────────────────────────
+
 @router.post("/api/auth/register", status_code=201, tags=["auth"])
 async def register(body: RegisterIn, db: AsyncSession = Depends(get_db)):
     await _create_user(db, body, role="user")
     return {"ok": True, "message": "สมัครสมาชิกสำเร็จ"}
 
 
-# =========================================================
-# POST /api/auth/login
-# =========================================================
+# ── POST /api/auth/login ──────────────────────────────────────────────────────
+
 @router.post("/api/auth/login", tags=["auth"])
-async def login(body: LoginIn, response: Response, db: AsyncSession = Depends(get_db)):
+@limiter.limit("5/minute")
+async def login(
+    request: Request,
+    body: LoginIn,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
     identifier = body.identifier.strip().lower()
+    client_ip  = request.client.host
+
     result = await db.execute(
         select(UserModel).where(
             (UserModel.username_lower == identifier) | (UserModel.email == identifier)
@@ -85,43 +167,108 @@ async def login(body: LoginIn, response: Response, db: AsyncSession = Depends(ge
 
     if user is None:
         bcrypt.checkpw(b"dummy", bcrypt.hashpw(b"dummy", bcrypt.gensalt(rounds=12)))
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"
-        )
+        audit.warning("LOGIN_FAIL ip=%s identifier=%s reason=not_found", client_ip, identifier)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
 
-    if user.is_active != "true":
+    if not user.is_active:
+        audit.warning("LOGIN_BLOCKED ip=%s user=%s", client_ip, user.username)
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="บัญชีนี้ถูกระงับการใช้งาน")
 
-    if not verify_password(body.password, user.password_hash):
+    if user.auth_provider == "google" and not user.password_hash:
         raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"
+            status.HTTP_400_BAD_REQUEST,
+            detail="บัญชีนี้ใช้ Google Login กรุณาคลิก 'Sign in with Google'",
         )
 
-    token = create_token({"_id": user.id, "username": user.username, "role": user.role})
+    if not verify_password(body.password, user.password_hash):
+        audit.warning("LOGIN_FAIL ip=%s user=%s reason=wrong_password", client_ip, user.username)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
+
+    audit.info("LOGIN_OK ip=%s user=%s role=%s", client_ip, user.username, user.role)
+    token = create_token(user.id, user.username, user.role)
     set_auth_cookie(response, token)
     return {"user": {"username": user.username, "role": user.role}}
 
 
-# =========================================================
-# POST /api/auth/logout
-# =========================================================
+# ── POST /api/auth/google/callback ───────────────────────────────────────────
+
+@router.post("/api/auth/google/callback", tags=["auth"])
+@limiter.limit("10/minute")
+async def google_callback(
+    request: Request,
+    body: GoogleCallbackIn,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(503, detail="Google Login ยังไม่เปิดใช้งาน")
+
+    # แลก code กับ Google
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code":          body.code,
+                "client_id":     GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri":  body.redirect_uri,
+                "grant_type":    "authorization_code",
+            },
+            timeout=10,
+        )
+
+    if token_res.status_code != 200:
+        audit.warning("GOOGLE_TOKEN_FAIL ip=%s status=%s body=%s",
+                      request.client.host, token_res.status_code, token_res.text[:200])
+        raise HTTPException(401, detail="Google authentication ล้มเหลว กรุณาลองใหม่")
+
+    id_token_str = token_res.json().get("id_token", "")
+    if not id_token_str:
+        raise HTTPException(401, detail="Google ไม่ส่ง token กลับมา")
+
+    try:
+        info = _decode_jwt_payload(id_token_str)
+    except Exception:
+        raise HTTPException(401, detail="ไม่สามารถอ่าน Google token ได้")
+
+    email     = info.get("email", "").lower()
+    google_id = info.get("sub", "")
+    name      = info.get("name", "")
+
+    if not email or not google_id:
+        raise HTTPException(401, detail="Google token ไม่มีข้อมูล email")
+
+    user = await _find_or_create_google_user(
+        db, email, google_id, name, request.client.host
+    )
+
+    if not user.is_active:
+        raise HTTPException(403, detail="บัญชีนี้ถูกระงับการใช้งาน")
+
+    audit.info("GOOGLE_LOGIN_OK ip=%s user=%s role=%s",
+               request.client.host, user.username, user.role)
+    token = create_token(user.id, user.username, user.role)
+    set_auth_cookie(response, token)
+    return {"user": {"username": user.username, "role": user.role}}
+
+
+# ── POST /api/auth/logout ─────────────────────────────────────────────────────
+
 @router.post("/api/auth/logout", tags=["auth"])
 async def logout(response: Response):
     clear_auth_cookie(response)
     return {"ok": True}
 
 
-# =========================================================
-# GET /api/auth/me
-# =========================================================
+# ── GET /api/auth/me ──────────────────────────────────────────────────────────
+
 @router.get("/api/auth/me", tags=["auth"])
 async def get_me(current: dict = Depends(require_user)):
     return {"username": current["username"], "role": current.get("role", "user")}
 
 
-# =========================================================
-# Admin endpoints
-# =========================================================
+# ── Admin endpoints ───────────────────────────────────────────────────────────
+
 @router.post("/api/auth/admin/create-user", status_code=201, tags=["auth"])
 async def admin_create_user(
     body: AdminCreateUserIn,
@@ -131,21 +278,24 @@ async def admin_create_user(
     await _create_user(db, body, role=body.role)
     return {"ok": True, "message": f"สร้าง user '{body.username}' (role: {body.role}) สำเร็จ"}
 
+
 @router.get("/api/auth/admin/users", tags=["auth"])
 async def admin_list_users(
     _admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(UserModel).order_by(UserModel.created_at.desc()).limit(500))
-    users = result.scalars().all()
+    result = await db.execute(
+        select(UserModel).order_by(UserModel.created_at.desc()).limit(500)
+    )
     return [
         {
-            "id": u.id,
-            "username": u.username,
-            "email": u.email,
-            "role": u.role,
-            "is_active": u.is_active,
-            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "id":            u.id,
+            "username":      u.username,
+            "email":         u.email,
+            "role":          u.role,
+            "is_active":     u.is_active,
+            "auth_provider": getattr(u, "auth_provider", "local"),
+            "created_at":    u.created_at.isoformat() if u.created_at else None,
         }
-        for u in users
+        for u in result.scalars().all()
     ]

@@ -1,7 +1,7 @@
 """
-Auth request schemas with Thai validation messages.
+app/schemas/auth.py — Auth request schemas
 
-Used by auth router for register, login, and admin user creation.
+เพิ่ม GoogleCallbackIn สำหรับ authorization code flow
 """
 
 import re
@@ -10,12 +10,8 @@ from pydantic import BaseModel, EmailStr, field_validator
 
 from app.core.constants import RE_PHONE_TH, RE_USERNAME
 
-# =========================================================
-# Register / login
-# =========================================================
-class RegisterIn(BaseModel):
-    """Public registration payload."""
 
+class RegisterIn(BaseModel):
     username: str
     email: EmailStr
     password: str
@@ -53,15 +49,11 @@ class RegisterIn(BaseModel):
 
 
 class LoginIn(BaseModel):
-    """Login by username or email plus password."""
-
     identifier: str
     password: str
 
 
 class AdminCreateUserIn(RegisterIn):
-    """Admin-only user creation with explicit role."""
-
     role: str = "user"
 
     @field_validator("role")
@@ -70,3 +62,11 @@ class AdminCreateUserIn(RegisterIn):
         if v not in ("user", "admin"):
             raise ValueError("role ต้องเป็น 'user' หรือ 'admin'")
         return v
+
+
+# ── Google OAuth (Authorization Code Flow) ────────────────────────────────────
+
+class GoogleCallbackIn(BaseModel):
+    """รับ authorization code จาก Google redirect และ redirect_uri ที่ใช้"""
+    code:         str   # ?code=xxx จาก Google
+    redirect_uri: str   # ต้องตรงกับที่ส่งไป Google ตอนแรก
