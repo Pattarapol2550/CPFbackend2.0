@@ -1,5 +1,7 @@
 """
 app/models/user.py
+"""
+from sqlalchemy import Boolean, Column, DateTime, Integer, String
 
 เพิ่ม 2 columns ใหม่สำหรับ Google OAuth:
   - google_id      : unique ID จาก Google (sub field)
@@ -30,6 +32,8 @@ class UserModel(Base):
     created_at     = Column(DateTime(timezone=True))
     is_active      = Column(Boolean,              nullable=False, default=True)
 
+    # Google OAuth
+    google_id      = Column(String(128),          unique=True, nullable=True)
     # ── Google OAuth ──────────────────────────────────────────────────────────
     # google_id: "sub" จาก Google ID token — unique ต่อ Google account
     google_id      = Column(String(128),          unique=True,  nullable=True)

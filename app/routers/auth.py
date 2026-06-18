@@ -1,4 +1,13 @@
 """
+app/routers/auth.py — เพิ่ม admin endpoints สำหรับ Settings page
+  - GET  /api/auth/admin/users           — รายชื่อ users
+  - POST /api/auth/admin/create-user     — สร้าง user
+  - PATCH /api/auth/admin/users/{id}/role   — เปลี่ยน role
+  - PATCH /api/auth/admin/users/{id}/active — toggle active
+  - DELETE /api/auth/admin/users/{id}       — ลบ user
+  - GET  /api/auth/profile               — ดูโปรไฟล์ตัวเอง
+  - PATCH /api/auth/profile              — แก้โปรไฟล์ตัวเอง
+  - PATCH /api/auth/change-password      — เปลี่ยนรหัสผ่าน
 app/routers/auth.py
 
 เปลี่ยน: ทุกคนที่ login ผ่าน Google ได้ role=user เสมอ
@@ -31,6 +40,15 @@ from app.core.security import (
 )
 from app.database import get_db
 from app.models.user import UserModel
+from app.schemas.auth import (
+    AdminCreateUserIn,
+    ChangePasswordIn,
+    GoogleCallbackIn,
+    LoginIn,
+    RegisterIn,
+    RoleUpdateIn,
+    UpdateProfileIn,
+)
 from app.schemas.auth import AdminCreateUserIn, GoogleCallbackIn, LoginIn, RegisterIn
 
 router = APIRouter()
@@ -54,6 +72,17 @@ def _decode_jwt_payload(token: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(payload))
 
 
+async def _get_user_by_id(db: AsyncSession, user_id: int) -> UserModel:
+    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="ไม่พบ user")
+    return user
+
+
+async def _find_or_create_google_user(
+    db, email, google_id, name, client_ip
+) -> UserModel:
 async def _find_or_create_google_user(
     db: AsyncSession,
     email: str,
@@ -81,6 +110,8 @@ async def _find_or_create_google_user(
             await db.commit()
             await db.refresh(user)
 
+    if user is None:
+        username = _safe_username(name, email)
     # 3. สร้างใหม่ — role=user เสมอ ไม่มี auto-admin
     if user is None:
         username = _safe_username(name, email)
@@ -99,6 +130,7 @@ async def _find_or_create_google_user(
             password_hash="",
             auth_provider="google",
             google_id=google_id,
+            role="user",
             role="user",               # ← user เสมอ ไม่ว่าจะ email domain ไหน
             created_at=datetime.now(timezone.utc),
             is_active=True,
@@ -106,6 +138,7 @@ async def _find_or_create_google_user(
         db.add(user)
         await db.commit()
         await db.refresh(user)
+        audit.info("GOOGLE_REGISTER ip=%s email=%s", client_ip, email)
         audit.info("GOOGLE_REGISTER ip=%s email=%s role=user", client_ip, email)
 
     return user
@@ -125,7 +158,7 @@ async def _create_user(db: AsyncSession, body: RegisterIn, role: str) -> UserMod
         username=body.username,
         username_lower=uname_lower,
         email=email_lower,
-        phone=body.phone,
+        phone=getattr(body, "phone", None),
         password_hash=hash_password(body.password),
         auth_provider="local",
         role=role,
@@ -137,6 +170,7 @@ async def _create_user(db: AsyncSession, body: RegisterIn, role: str) -> UserMod
     return user
 
 
+# ── Auth ──────────────────────────────────────────────────────────────────────
 # ── POST /api/auth/register ───────────────────────────────────────────────────
 
 @router.post("/api/auth/register", status_code=201, tags=["auth"])
@@ -167,6 +201,15 @@ async def login(
 
     if user is None:
         bcrypt.checkpw(b"dummy", bcrypt.hashpw(b"dummy", bcrypt.gensalt(rounds=12)))
+        audit.warning("LOGIN_FAIL ip=%s identifier=%s", client_ip, identifier)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
+
+    if not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="บัญชีนี้ถูกระงับการใช้งาน")
+
+    if getattr(user, "auth_provider", "local") == "google" and not user.password_hash:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            detail="บัญชีนี้ใช้ Google Login กรุณาคลิก 'Sign in with Google'")
         audit.warning("LOGIN_FAIL ip=%s identifier=%s reason=not_found", client_ip, identifier)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
 
@@ -267,6 +310,83 @@ async def get_me(current: dict = Depends(require_user)):
     return {"username": current["username"], "role": current.get("role", "user")}
 
 
+# ── Profile ───────────────────────────────────────────────────────────────────
+
+@router.get("/api/auth/profile", tags=["profile"])
+async def get_profile(
+    current: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """ดูข้อมูลโปรไฟล์ของตัวเอง"""
+    user = await _get_user_by_id(db, int(current["sub"]))
+    return {
+        "id":            user.id,
+        "username":      user.username,
+        "email":         user.email,
+        "phone":         user.phone,
+        "role":          user.role,
+        "auth_provider": getattr(user, "auth_provider", "local"),
+        "created_at":    user.created_at.isoformat() if user.created_at else None,
+    }
+
+
+@router.patch("/api/auth/profile", tags=["profile"])
+async def update_profile(
+    body: UpdateProfileIn,
+    response: Response,                          # ← เพิ่ม Response
+    current: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _get_user_by_id(db, int(current["sub"]))
+
+    if body.username is not None and body.username != user.username:
+        dup = await db.execute(
+            select(UserModel).where(
+                UserModel.username_lower == body.username.lower(),
+                UserModel.id != user.id,
+            )
+        )
+        if dup.scalar_one_or_none():
+            raise HTTPException(409, detail="ชื่อผู้ใช้นี้ถูกใช้งานแล้ว")
+        user.username       = body.username
+        user.username_lower = body.username.lower()
+
+    if body.phone is not None:
+        user.phone = body.phone
+
+    await db.commit()
+    await db.refresh(user)
+
+    # ออก token ใหม่ทันที — username ใหม่จะอยู่ใน token เลย
+    token = create_token(user.id, user.username, user.role)
+    set_auth_cookie(response, token)
+
+    return {"ok": True, "message": "อัพเดทโปรไฟล์สำเร็จ", "username": user.username}
+
+@router.patch("/api/auth/change-password", tags=["profile"])
+async def change_password(
+    body: ChangePasswordIn,
+    current: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """เปลี่ยนรหัสผ่าน (เฉพาะ local account)"""
+    user = await _get_user_by_id(db, int(current["sub"]))
+
+    if getattr(user, "auth_provider", "local") == "google":
+        raise HTTPException(400, detail="บัญชี Google ไม่สามารถเปลี่ยนรหัสผ่านได้")
+
+    if not verify_password(body.current_password, user.password_hash):
+        raise HTTPException(400, detail="รหัสผ่านปัจจุบันไม่ถูกต้อง")
+
+    user.password_hash = hash_password(body.new_password)
+    await db.commit()
+    audit.info("PASSWORD_CHANGE user=%s", user.username)
+    return {"ok": True, "message": "เปลี่ยนรหัสผ่านสำเร็จ"}
+
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+@router.post("/api/auth/admin/create-user", status_code=201, tags=["admin"])
 # ── Admin endpoints ───────────────────────────────────────────────────────────
 
 @router.post("/api/auth/admin/create-user", status_code=201, tags=["auth"])
@@ -279,6 +399,7 @@ async def admin_create_user(
     return {"ok": True, "message": f"สร้าง user '{body.username}' (role: {body.role}) สำเร็จ"}
 
 
+@router.get("/api/auth/admin/users", tags=["admin"])
 @router.get("/api/auth/admin/users", tags=["auth"])
 async def admin_list_users(
     _admin: dict = Depends(require_admin),
@@ -292,10 +413,63 @@ async def admin_list_users(
             "id":            u.id,
             "username":      u.username,
             "email":         u.email,
+            "phone":         u.phone,
             "role":          u.role,
             "is_active":     u.is_active,
             "auth_provider": getattr(u, "auth_provider", "local"),
             "created_at":    u.created_at.isoformat() if u.created_at else None,
         }
         for u in result.scalars().all()
+    ]
+
+
+# @router.patch("/api/auth/admin/users/{user_id}/role", tags=["admin"])
+# async def admin_update_role(
+#     user_id: int,
+#     body: RoleUpdateIn,
+#     current_admin: dict = Depends(require_admin),
+#     db: AsyncSession = Depends(get_db),
+# ):
+#     """เปลี่ยน role — admin ไม่สามารถเปลี่ยน role ตัวเองได้"""
+#     if int(current_admin["sub"]) == user_id:
+#         raise HTTPException(400, detail="ไม่สามารถเปลี่ยน role ของตัวเองได้")
+#     user = await _get_user_by_id(db, user_id)
+#     user.role = body.role
+#     await db.commit()
+#     audit.info("ROLE_CHANGE admin=%s target=%s new_role=%s",
+#                current_admin.get("username"), user.username, body.role)
+#     return {"ok": True, "username": user.username, "role": user.role}
+
+
+@router.patch("/api/auth/admin/users/{user_id}/active", tags=["admin"])
+async def admin_toggle_active(
+    user_id: int,
+    current_admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """เปิด/ปิด account — admin ไม่สามารถปิดตัวเองได้"""
+    if int(current_admin["sub"]) == user_id:
+        raise HTTPException(400, detail="ไม่สามารถปิด account ของตัวเองได้")
+    user = await _get_user_by_id(db, user_id)
+    user.is_active = not user.is_active
+    await db.commit()
+    state = "ACTIVATED" if user.is_active else "DEACTIVATED"
+    audit.info("USER_%s admin=%s target=%s", state, current_admin.get("username"), user.username)
+    return {"ok": True, "username": user.username, "is_active": user.is_active}
+
+
+@router.delete("/api/auth/admin/users/{user_id}", tags=["admin"])
+async def admin_delete_user(
+    user_id: int,
+    current_admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """ลบ user — admin ไม่สามารถลบตัวเองได้"""
+    if int(current_admin["sub"]) == user_id:
+        raise HTTPException(400, detail="ไม่สามารถลบ account ของตัวเองได้")
+    user = await _get_user_by_id(db, user_id)
+    await db.delete(user)
+    await db.commit()
+    audit.info("USER_DELETE admin=%s target=%s", current_admin.get("username"), user.username)
+    return {"ok": True, "message": f"ลบ user '{user.username}' สำเร็จ"}
     ]
