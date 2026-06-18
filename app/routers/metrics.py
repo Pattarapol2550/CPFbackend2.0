@@ -92,7 +92,10 @@ async def save_data(
     record = MetricModel(
         compressor_id=payload.compressor_id,
         timestamp=record_time,
-        inputs_snapshot=payload.model_dump(mode="json"),
+       inputs_snapshot=payload.model_dump(
+        mode="json",
+        exclude={"timestamp", "compressor_id"}
+    ),
         diagnosis=diag,
     )
     db.add(record)
