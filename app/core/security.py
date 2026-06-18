@@ -1,7 +1,8 @@
 """
-Password hashing, JWT creation/validation, and FastAPI auth dependencies.
+app/core/security.py — Password hashing, JWT, and FastAPI auth dependencies.
 
-Imported by auth router and any route requiring require_user / require_admin.
+FIX: create_token รับ explicit params แทน dict{"_id": ...}
+     ป้องกัน KeyError ถ้าใครเรียกโดยไม่รู้ว่าต้องส่ง "_id"
 """
 
 from datetime import datetime, timedelta, timezone
@@ -22,35 +23,36 @@ from app.config import (
     TOKEN_TTL_H,
 )
 
-# =========================================================
-# Password
-# =========================================================
+# ── Password ──────────────────────────────────────────────────────────────────
+
 def hash_password(plain: str) -> str:
     """Hash a plaintext password with bcrypt (12 rounds)."""
     return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
 
+
 def verify_password(plain: str, hashed: str) -> bool:
-    """Return True if plain password matches the stored bcrypt hash."""
+    """Return True if plain matches the stored bcrypt hash."""
     try:
         return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
     except Exception:
         return False
 
 
-# =========================================================
-# Token
-# =========================================================
-def create_token(user_doc: dict) -> str:
-    """Build a signed JWT for the given user document (_id, username, role)."""
+# ── Token ─────────────────────────────────────────────────────────────────────
+
+# FIX: เปลี่ยนจาก create_token(user_doc: dict) ที่ต้องการ key "_id" (MongoDB legacy)
+#      เป็น explicit params ที่ชัดเจน ป้องกัน KeyError ในอนาคต
+def create_token(user_id: int, username: str, role: str) -> str:
     now = datetime.now(timezone.utc)
     payload = {
-        "sub": str(user_doc["_id"]),
-        "username": user_doc["username"],
-        "role": user_doc.get("role", "user"),
-        "iat": now,
-        "exp": now + timedelta(hours=TOKEN_TTL_H),
+        "sub":      str(user_id),
+        "username": username,
+        "role":     role,
+        "iat":      now,
+        "exp":      now + timedelta(hours=TOKEN_TTL_H),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
 
 def decode_token(token: str) -> dict:
     """Decode and validate JWT; raises HTTP 401 on expiry or invalid token."""
@@ -62,9 +64,8 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token ไม่ถูกต้อง")
 
 
-# =========================================================
-# Cookie helpers
-# =========================================================
+# ── Cookie helpers ────────────────────────────────────────────────────────────
+
 def set_auth_cookie(response: Response, token: str) -> None:
     """Set the HttpOnly auth cookie on the response."""
     response.set_cookie(
@@ -77,6 +78,7 @@ def set_auth_cookie(response: Response, token: str) -> None:
         path=AUTH_COOKIE_PATH,
     )
 
+
 def clear_auth_cookie(response: Response) -> None:
     """Remove the auth cookie from the client."""
     response.delete_cookie(
@@ -88,9 +90,8 @@ def clear_auth_cookie(response: Response) -> None:
     )
 
 
-# =========================================================
-# Dependencies
-# =========================================================
+# ── Dependencies ──────────────────────────────────────────────────────────────
+
 async def get_current_user(request: Request) -> dict:
     """Extract and decode JWT from the auth cookie."""
     token = request.cookies.get(AUTH_COOKIE_NAME)
@@ -98,12 +99,14 @@ async def get_current_user(request: Request) -> dict:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="กรุณา login ก่อน")
     return decode_token(token)
 
+
+async def require_user(current: dict = Depends(get_current_user)) -> dict:
+    """Require any authenticated user."""
+    return current
+
+
 async def require_admin(current: dict = Depends(get_current_user)) -> dict:
     """Require authenticated user with admin role."""
     if current.get("role") != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="ต้องการสิทธิ์ admin")
-    return current
-
-async def require_user(current: dict = Depends(get_current_user)) -> dict:
-    """Require any authenticated user."""
     return current

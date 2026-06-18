@@ -45,3 +45,12 @@ AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true").lower() == "true"
 AUTH_COOKIE_HTTPONLY = os.getenv("AUTH_COOKIE_HTTPONLY", "true").lower() == "true"
 AUTH_COOKIE_PATH = os.getenv("AUTH_COOKIE_PATH", "/")
 AUTH_COOKIE_MAX_AGE = int(os.getenv("AUTH_COOKIE_MAX_AGE", str(TOKEN_TTL_H * 3600)))
+
+# ── Google OAuth ──────────────────────────────────────────────────────────────
+GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID",     "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+if not GOOGLE_CLIENT_ID:
+    logger.warning("⚠️  GOOGLE_CLIENT_ID ไม่ได้ตั้งค่า — Google Login จะไม่ทำงาน")
+if not GOOGLE_CLIENT_SECRET:
+    logger.warning("⚠️  GOOGLE_CLIENT_SECRET ไม่ได้ตั้งค่า — Google Login จะไม่ทำงาน")
