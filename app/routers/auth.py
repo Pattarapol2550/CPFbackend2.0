@@ -405,6 +405,8 @@ async def admin_delete_user(
     if int(current_admin["sub"]) == user_id:
         raise HTTPException(400, detail="ไม่สามารถลบ account ของตัวเองได้")
     user = await _get_user_by_id(db, user_id)
+    if getattr(user,"role",None) =="admin":
+        raise HTTPException(status_code=403,detail="ไม่สามารถลบผู้ดูแลได้")
     await db.delete(user)
     await db.commit()
     audit.info("USER_DELETE admin=%s target=%s", current_admin.get("username"), user.username)
