@@ -2,6 +2,20 @@
 app/models/user.py
 """
 from sqlalchemy import Boolean, Column, DateTime, Integer, String
+
+เพิ่ม 2 columns ใหม่สำหรับ Google OAuth:
+  - google_id      : unique ID จาก Google (sub field)
+  - auth_provider  : "local" หรือ "google"
+
+⚠️  ต้องรัน SQL migration นี้ใน PostgreSQL ก่อน:
+
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS google_id     VARCHAR(128) UNIQUE,
+      ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(16) NOT NULL DEFAULT 'local';
+"""
+
+from sqlalchemy import Boolean, Column, DateTime, Integer, String
+
 from app.database import Base
 
 
@@ -20,4 +34,8 @@ class UserModel(Base):
 
     # Google OAuth
     google_id      = Column(String(128),          unique=True, nullable=True)
+    # ── Google OAuth ──────────────────────────────────────────────────────────
+    # google_id: "sub" จาก Google ID token — unique ต่อ Google account
+    google_id      = Column(String(128),          unique=True,  nullable=True)
+    # auth_provider: "local" = email+password, "google" = Google OAuth
     auth_provider  = Column(String(16),           nullable=False, default="local")

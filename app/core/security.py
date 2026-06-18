@@ -43,6 +43,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 # FIX: เปลี่ยนจาก create_token(user_doc: dict) ที่ต้องการ key "_id" (MongoDB legacy)
 #      เป็น explicit params ที่ชัดเจน ป้องกัน KeyError ในอนาคต
 def create_token(user_id: int, username: str, role: str) -> str:
+    """Build a signed JWT from explicit user fields."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub":      str(user_id),

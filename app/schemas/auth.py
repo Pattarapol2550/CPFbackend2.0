@@ -1,4 +1,9 @@
 """app/schemas/auth.py — เพิ่ม schemas สำหรับ Settings"""
+"""
+app/schemas/auth.py — Auth request schemas
+
+เพิ่ม GoogleCallbackIn สำหรับ authorization code flow
+"""
 
 import re
 from pydantic import BaseModel, EmailStr, field_validator
@@ -114,3 +119,11 @@ class UpdateProfileIn(BaseModel):
         if not RE_USERNAME.match(v.strip()):
             raise ValueError("ชื่อผู้ใช้ต้องยาว 3-32 ตัว ใช้ได้เฉพาะ a-z, 0-9, _ และ .")
         return v.strip()    
+
+
+# ── Google OAuth (Authorization Code Flow) ────────────────────────────────────
+
+class GoogleCallbackIn(BaseModel):
+    """รับ authorization code จาก Google redirect และ redirect_uri ที่ใช้"""
+    code:         str   # ?code=xxx จาก Google
+    redirect_uri: str   # ต้องตรงกับที่ส่งไป Google ตอนแรก
