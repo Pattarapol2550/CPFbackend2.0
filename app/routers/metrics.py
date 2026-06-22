@@ -66,7 +66,12 @@ def _serialize_detail_row(row: MetricModel, tz_th) -> dict:
             "condenser":   systems.get("condenser", {}).get("status"),
         },
         "alarms": [
-            {"severity": a.get("severity"), "title": a.get("title"), "message": a.get("message")}
+            {
+                "severity":       a.get("severity"),
+                "title":          a.get("title"),
+                "message":        a.get("message"),
+                "recommendation": a.get("recommendation", []),
+            }
             for a in alarms
         ],
         "alarm_count": len(alarms),
