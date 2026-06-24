@@ -4,6 +4,8 @@ Single- and two-stage refrigeration cycle calculators.
 Pure calculation logic (no HTTP). Used by calculator router endpoints.
 """
 
+import math
+
 import CoolProp.CoolProp as CP
 
 from app.core.constants import FLUID
@@ -14,7 +16,7 @@ from app.services.utils import pressure_kgcm2_to_pa
 def calculate_single_stage(data: CalcInput) -> dict:
     """Run single-stage cycle calculation from CalcInput."""
     fluid = FLUID
-    P_comp_kW = (1.732 * data.voltage * data.current * data.power_factor) / 1000
+    P_comp_kW = (math.sqrt(3) * data.voltage * data.current * data.power_factor) / 1000
     P_low = pressure_kgcm2_to_pa(data.sp)
     P_high = pressure_kgcm2_to_pa(data.dp)
     T_evap = CP.PropsSI("T", "P", P_low, "Q", 1, fluid) - 273.15
@@ -178,9 +180,10 @@ def calculate_two_stage(data: TwoStageInput) -> dict:
     h6 = h5
     hf_int = CP.PropsSI("H", "P", P_int, "Q", 0, fluid) / 1000
     h7 = hf_int
-    ratio = (h2 - h6) / (h3 - h6)
-    W_booster = (1.732 * data.voltage * data.i_booster * data.power_factor) / 1000
-    W_high = (1.732 * data.voltage * data.i_high * data.power_factor) / 1000
+    # Flash intercooler mass balance: ṁ_H/ṁ_L = (h2 - hf_int) / (hg_int - hf_int)
+    ratio = (h2 - h7) / (h3 - h7)
+    W_booster = (math.sqrt(3) * data.voltage * data.i_booster * data.power_factor) / 1000
+    W_high = (math.sqrt(3) * data.voltage * data.i_high * data.power_factor) / 1000
     W_total = W_booster + W_high
     m_low = W_booster / (h2 - h1)
     m_high = m_low * ratio

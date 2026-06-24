@@ -57,8 +57,8 @@ def _serialize_detail_row(row: MetricModel, tz_th) -> dict:
             "h2s":         enth.get("h2s"),
             "h3":          enth.get("h3"),
             "eta_is_pct":  enth.get("eta_is_pct"),
-            "q_l_kgkg":    enth.get("q_l_kgkg"),
-            "w_comp_kgkg": enth.get("w_comp_kgkg"),
+            "q_l_kjkg":    enth.get("q_l_kjkg"),
+            "w_comp_kjkg": enth.get("w_comp_kjkg"),
         },
         "status": {
             "sensor":      systems.get("sensor",    {}).get("status"),

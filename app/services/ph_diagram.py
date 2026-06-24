@@ -34,10 +34,13 @@ def build_saturation_dome(fluid: str = FLUID, n_points: int = 60) -> dict:
             continue
     h_crit = CP.PropsSI("H", "T", T_crit_K, "Q", 0, fluid) / 1000
     p_crit = CP.PropsSI("P", "T", T_crit_K, "Q", 0, fluid) / 1e6
+    crit_point = {"h": round(h_crit, 2), "p": round(p_crit, 4)}
+    liq_points.append(crit_point)
+    vap_points.append(crit_point)
     return {
         "liquid": liq_points,
         "vapour": vap_points,
-        "critical": {"h": round(h_crit, 2), "p": round(p_crit, 4)},
+        "critical": crit_point,
     }
 
 
