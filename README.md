@@ -379,8 +379,8 @@ axios.defaults.withCredentials = true;
       "h2s": 1598.4,
       "h3": 325.1,
       "eta_is_pct": 86.8,
-      "q_l_kgkg": 1125.1,
-      "w_comp_kgkg": 170.6
+      "q_l_kjkg": 1125.1,
+      "w_comp_kjkg": 170.6
     },
     "systems": {
       "sensor": { "status": "Normal", "text": "Superheat = 8.3" },

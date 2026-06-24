@@ -201,11 +201,13 @@ def diagnose_compressor(data: CompressorDataInput):
         )
 
         eta_is_pct = (
-            round((h2s - h1) / (h2 - h1) * 100, 1) if (h2s and h1 and h2 and (h2 - h1) != 0) else None
+            round((h2s - h1) / (h2 - h1) * 100, 1)
+            if (h2s is not None and h1 is not None and h2 is not None and (h2 - h1) != 0)
+            else None
         )
 
-        q_l_kgkg = round((h1 - h3) / 1000, 2) if (h1 and h3) else None
-        w_comp_kgkg = round((h2 - h1) / 1000, 2) if (h1 and h2) else None
+        q_l_kjkg = round((h1 - h3) / 1000, 2) if (h1 is not None and h3 is not None) else None
+        w_comp_kjkg = round((h2 - h1) / 1000, 2) if (h1 is not None and h2 is not None) else None
         m_dot_kgh = round(m_dot * 3600, 1) if m_dot else None
 
         result.update(
@@ -227,8 +229,8 @@ def diagnose_compressor(data: CompressorDataInput):
                     "h2s": h2s_kj,
                     "h3": h3_kj,
                     "eta_is_pct": eta_is_pct,
-                    "q_l_kgkg": q_l_kgkg,
-                    "w_comp_kgkg": w_comp_kgkg,
+                    "q_l_kjkg": q_l_kjkg,
+                    "w_comp_kjkg": w_comp_kjkg,
                 },
                 "systems": {
                     "sensor": {
