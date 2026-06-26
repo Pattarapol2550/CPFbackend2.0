@@ -2,8 +2,6 @@
 app/routers/auth.py — Authentication + Profile + Admin endpoints
 """
 
-import base64
-import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -11,6 +9,8 @@ from datetime import datetime, timezone
 import bcrypt
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -49,10 +49,16 @@ def _safe_username(display_name: str, fallback: str) -> str:
     return clean or "user___"
 
 
-def _decode_jwt_payload(token: str) -> dict:
-    payload = token.split(".")[1]
-    payload += "=" * (4 - len(payload) % 4)
-    return json.loads(base64.urlsafe_b64decode(payload))
+def _verify_google_id_token(token: str) -> dict:
+    """Verify Google ID token signature and audience, then return claims."""
+    try:
+        return google_id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            audience=GOOGLE_CLIENT_ID,
+        )
+    except Exception as exc:
+        raise HTTPException(401, detail="Google token ไม่ถูกต้องหรือหมดอายุ") from exc
 
 
 async def _get_user_by_id(db: AsyncSession, user_id: int) -> UserModel:
@@ -231,10 +237,7 @@ async def google_callback(
     if not id_token_str:
         raise HTTPException(401, detail="Google ไม่ส่ง token กลับมา")
 
-    try:
-        info = _decode_jwt_payload(id_token_str)
-    except Exception:
-        raise HTTPException(401, detail="ไม่สามารถอ่าน Google token ได้")
+    info = _verify_google_id_token(id_token_str)
 
     email     = info.get("email", "").lower()
     google_id = info.get("sub", "")

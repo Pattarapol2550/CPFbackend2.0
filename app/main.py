@@ -6,10 +6,11 @@ import logging
 from contextlib import asynccontextmanager
 
 import CoolProp.CoolProp as CP
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import CORS_ORIGINS
 from app.core.limiter import limiter          # ← import จากไฟล์กลาง
@@ -29,12 +30,23 @@ async def lifespan(application: FastAPI):
     yield
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"]        = "DENY"
+        response.headers["Referrer-Policy"]         = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"]      = "geolocation=(), microphone=(), camera=()"
+        return response
+
+
 def create_app() -> FastAPI:
     application = FastAPI(title="Ammonia Diagnostics API v2", lifespan=lifespan)
 
     application.state.limiter = limiter
     application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+    application.add_middleware(SecurityHeadersMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=CORS_ORIGINS,
