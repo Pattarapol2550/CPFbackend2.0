@@ -109,7 +109,9 @@ def diagnose_compressor(data: CompressorDataInput):
         # =========================================================
         # Alarms
         # =========================================================
-        if cop is not None and cop < 1.5:
+        # High stage COP is inherently higher (3-5) than booster/single (1.5-2.5)
+        cop_threshold = 2.5 if data.compressor_type == "high_stage" else 1.5
+        if cop is not None and cop < cop_threshold:
             alarms.append(
                 {
                     "severity": "Warning",
@@ -221,6 +223,8 @@ def diagnose_compressor(data: CompressorDataInput):
                 "pressure_ratio": safe_round(pressure_ratio),
                 "m_dot_kgh": safe_round(m_dot_kgh),
                 "alarms": alarms,
+                "compressor_type": data.compressor_type,
+                "cop_threshold": cop_threshold,
                 "modes": {"sh_mode": sh_mode, "dt_mode": dt_mode},
                 "enthalpy": {
                     "t_evap_c": t_evap_c,

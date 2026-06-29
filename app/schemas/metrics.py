@@ -23,3 +23,5 @@ class CompressorDataInput(BaseModel):
     current_amp: Optional[float] = None
     evaporator_room_temp_c: Optional[float] = None
     condenser_temp_c: Optional[float] = None
+    # "booster" = LP→intermediate, "high_stage" = intermediate→HP, "single" = single-stage
+    compressor_type: str = "single"
