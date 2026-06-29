@@ -159,27 +159,28 @@ def diagnose_compressor(data: CompressorDataInput):
                 )
 
         subcooling = None
+        approach = None
         if p_dis_pa and data.liquid_temp_c is not None:
             t_sat_dis = CP.PropsSI("T", "P", p_dis_pa, "Q", 0, fluid) - 273.15
             subcooling = t_sat_dis - data.liquid_temp_c
 
-            if data.condenser_temp_c is not None and p_dis_pa:
-                t_sat_dis2 = CP.PropsSI("T", "P", p_dis_pa, "Q", 1, fluid) - 273.15
-                approach = t_sat_dis2 - data.condenser_temp_c
-                if approach > 15:
-                    alarms.append(
-                        {
-                            "severity": "Critical",
-                            "title": "High Condensing Temperature",
-                            "message": "Condenser ระบายความร้อนได้ไม่ดี",
-                            "possible_causes": [
-                                "Condenser สกปรก",
-                                "พัดลม condenser เสีย",
-                                "น้ำหล่อเย็นร้อนเกิน",
-                            ],
-                            "recommendation": ["ล้าง condenser", "ตรวจพัดลม", "ตรวจ cooling water"],
-                        }
-                    )
+        if p_dis_pa and data.condenser_temp_c is not None:
+            t_sat_dis2 = CP.PropsSI("T", "P", p_dis_pa, "Q", 1, fluid) - 273.15
+            approach = t_sat_dis2 - data.condenser_temp_c
+            if approach > 15:
+                alarms.append(
+                    {
+                        "severity": "Critical",
+                        "title": "High Condensing Temperature",
+                        "message": "Condenser ระบายความร้อนได้ไม่ดี",
+                        "possible_causes": [
+                            "Condenser สกปรก",
+                            "พัดลม condenser เสีย",
+                            "น้ำหล่อเย็นร้อนเกิน",
+                        ],
+                        "recommendation": ["ล้าง condenser", "ตรวจพัดลม", "ตรวจ cooling water"],
+                    }
+                )
         pressure_ratio = (
             (p_dis_pa / p_suc_pa) if (p_suc_pa and p_dis_pa and p_suc_pa > 0) else None
         )
@@ -187,10 +188,10 @@ def diagnose_compressor(data: CompressorDataInput):
         sensor_status = "Unknown"
         if superheat is not None:
             sensor_status = "Normal" if 2 <= superheat <= 15 else "Warning"
-        h1_kj = round(h1 / 1000, 2) if h1 else None
-        h2_kj = round(h2 / 1000, 2) if h2 else None
-        h2s_kj = round(h2s / 1000, 2) if h2s else None
-        h3_kj = round(h3 / 1000, 2) if h3 else None
+        h1_kj = round(h1 / 1000, 2) if h1 is not None else None
+        h2_kj = round(h2 / 1000, 2) if h2 is not None else None
+        h2s_kj = round(h2s / 1000, 2) if h2s is not None else None
+        h3_kj = round(h3 / 1000, 2) if h3 is not None else None
 
         t_evap_c = (
             round(CP.PropsSI("T", "P", p_suc_pa, "Q", 1, fluid) - 273.15, 2) if p_suc_pa else None
@@ -237,7 +238,15 @@ def diagnose_compressor(data: CompressorDataInput):
                         "status": sensor_status,
                         "text": f"Superheat = {safe_round(superheat)}",
                     },
-                    "condenser": {"status": "Unknown", "text": "--"},
+                    "condenser": {
+                        "status": (
+                            "Critical" if approach is not None and approach > 15
+                            else "Warning" if approach is not None and approach > 8
+                            else "Normal" if approach is not None
+                            else "Unknown"
+                        ),
+                        "text": f"Approach = {safe_round(approach)} K" if approach is not None else "--",
+                    },
                 },
             }
         )
