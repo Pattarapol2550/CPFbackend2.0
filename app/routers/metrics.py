@@ -3,10 +3,13 @@ app/routers/metrics.py — Metrics CRUD endpoints.
 """
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+
+logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
