@@ -146,6 +146,20 @@ def diagnose_compressor(data: CompressorDataInput):
                         "recommendation": ["ตรวจ TXV", "ตรวจระดับน้ำยา", "ตรวจโหลดห้องเย็น"],
                     }
                 )
+            elif superheat < 0:
+                alarms.append(
+                    {
+                        "severity": "Critical",
+                        "title": "Liquid Floodback",
+                        "message": f"น้ำยาเหลวเข้า compressor (Superheat = {safe_round(superheat)} K) — หยุดเครื่องทันที",
+                        "possible_causes": [
+                            "TXV เปิดมากเกินไป",
+                            "โหลด evaporator ลดลงกะทันหัน",
+                            "น้ำยาล้น evaporator",
+                        ],
+                        "recommendation": ["หยุดเครื่องทันที", "ตรวจ TXV", "ตรวจระดับน้ำยา"],
+                    }
+                )
             elif superheat < 2:
                 alarms.append(
                     {
@@ -186,6 +200,20 @@ def diagnose_compressor(data: CompressorDataInput):
         pressure_ratio = (
             (p_dis_pa / p_suc_pa) if (p_suc_pa and p_dis_pa and p_suc_pa > 0) else None
         )
+        if pressure_ratio is not None and pressure_ratio > 12:
+            alarms.append(
+                {
+                    "severity": "Critical",
+                    "title": "High Pressure Ratio",
+                    "message": f"Pressure ratio สูงเกินอันตราย ({safe_round(pressure_ratio)}) — เสี่ยง compressor overload",
+                    "possible_causes": [
+                        "Suction pressure ต่ำผิดปกติ",
+                        "Discharge pressure สูงผิดปกติ",
+                        "Condenser ระบายความร้อนไม่ได้",
+                    ],
+                    "recommendation": ["ตรวจแรงดัน suction/discharge", "ตรวจ condenser", "พิจารณาหยุดเครื่อง"],
+                }
+            )
 
         sensor_status = "Unknown"
         if superheat is not None:
