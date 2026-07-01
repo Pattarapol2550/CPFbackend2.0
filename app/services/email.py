@@ -8,7 +8,7 @@ from typing import Optional
 
 import resend
 
-from app.config import ALARM_EMAIL_FROM, RESEND_API_KEY
+from app.config import ALARM_EMAIL_FROM, ALARM_EMAIL_TO, RESEND_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -77,16 +77,20 @@ def _build_html(compressor_id: str, alarms: list[dict], timestamp: Optional[str]
 async def send_alarm_email(
     compressor_id: str,
     alarms: list[dict],
-    to_emails: list[str],
+    admin_emails: list[str],
     timestamp: Optional[str] = None,
 ) -> None:
-    """ส่ง alarm email ไปยัง admin emails — มี cooldown 10 นาทีต่อ compressor"""
+    """ส่ง alarm email — มี cooldown 10 นาทีต่อ compressor
+    ถ้าตั้ง ALARM_EMAIL_TO ไว้ใน env จะใช้นั้นเลย ไม่งั้นใช้ admin emails จาก DB
+    """
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY ไม่ได้ตั้งค่า — ข้าม email notification")
         return
 
+    to_emails = ALARM_EMAIL_TO if ALARM_EMAIL_TO else admin_emails
+
     if not to_emails:
-        logger.warning("ไม่มี admin email ในระบบ — ข้าม email notification")
+        logger.warning("ไม่มี email ปลายทาง — ข้าม email notification")
         return
 
     critical = [a for a in alarms if a.get("severity") == "Critical"]
