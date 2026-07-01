@@ -2,7 +2,7 @@
 app/models/user.py — ORM mapping for the users table.
 """
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
 
 from app.database import Base
 
@@ -19,6 +19,8 @@ class UserModel(Base):
     role           = Column(String(20),  nullable=False, default="user")
     created_at     = Column(DateTime(timezone=True))
     is_active      = Column(Boolean,     nullable=False, default=True)
+
+    avatar         = Column(Text,         nullable=True)
 
     # Google OAuth
     google_id      = Column(String(128), unique=True, nullable=True)

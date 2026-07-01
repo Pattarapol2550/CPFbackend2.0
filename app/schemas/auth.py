@@ -70,9 +70,21 @@ class GoogleCallbackIn(BaseModel):
 # ── Profile / Settings ────────────────────────────────────────────────────────
 
 class UpdateProfileIn(BaseModel):
-    """แก้ไขชื่อผู้ใช้และเบอร์โทร"""
+    """แก้ไขชื่อผู้ใช้ เบอร์โทร และ avatar"""
     username: str | None = None
     phone:    str | None = None
+    avatar:   str | None = None  # base64 JPEG หรือ None เพื่อลบ
+
+    @field_validator("avatar")
+    @classmethod
+    def check_avatar(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.startswith("data:image/"):
+            raise ValueError("avatar ต้องเป็น data URL ของรูป (data:image/...)")
+        if len(v) > 500_000:
+            raise ValueError("ขนาดรูปใหญ่เกินไป (สูงสุด ~350 KB)")
+        return v
 
     @field_validator("username")
     @classmethod

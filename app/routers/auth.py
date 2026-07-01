@@ -291,6 +291,7 @@ async def get_profile(
         "role":          user.role,
         "auth_provider": getattr(user, "auth_provider", "local"),
         "created_at":    user.created_at.isoformat() if user.created_at else None,
+        "avatar":        getattr(user, "avatar", None),
     }
 
 
@@ -317,6 +318,9 @@ async def update_profile(
 
     if body.phone is not None:
         user.phone = body.phone
+
+    if "avatar" in body.model_fields_set:
+        user.avatar = body.avatar  # None = ลบรูป
 
     await db.commit()
     await db.refresh(user)
