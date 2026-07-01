@@ -1,28 +1,26 @@
 """
-app/services/email.py — Alarm email notifications via Resend.
+app/services/email.py — Alarm email notifications via Gmail SMTP.
 """
 
+import asyncio
 import logging
+import smtplib
 import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Optional
 
-import resend
-
-from app.config import ALARM_EMAIL_FROM, ALARM_EMAIL_TO, RESEND_API_KEY
+from app.config import ALARM_EMAIL_FROM, ALARM_EMAIL_PASSWORD, ALARM_EMAIL_TO
 
 logger = logging.getLogger(__name__)
 
-resend.api_key = RESEND_API_KEY
-
-# throttle: compressor_id → unix timestamp of last sent email
-# ป้องกันส่ง email ซ้ำถี่เกินไป (cooldown 10 นาที/compressor)
+# cooldown 10 นาที/compressor ป้องกัน spam
 _last_sent: dict[str, float] = {}
 COOLDOWN_SECONDS = 600
 
 
 def _should_send(compressor_id: str) -> bool:
-    last = _last_sent.get(compressor_id, 0)
-    return (time.time() - last) >= COOLDOWN_SECONDS
+    return (time.time() - _last_sent.get(compressor_id, 0)) >= COOLDOWN_SECONDS
 
 
 def _mark_sent(compressor_id: str) -> None:
@@ -43,8 +41,8 @@ def _build_html(compressor_id: str, alarms: list[dict], timestamp: Optional[str]
             {a.get('title','')}
           </td>
           <td style="padding:10px 12px;border-bottom:1px solid #30363d;color:#8b949e;font-size:13px;">
-            {a.get('message','')}<br/>
-            {'<ul style="margin:6px 0 0 16px;padding:0;color:#8b949e;">' + recs + '</ul>' if recs else ''}
+            {a.get('message','')}
+            {'<ul style="margin:6px 0 0 16px;padding:0;">' + recs + '</ul>' if recs else ''}
           </td>
         </tr>"""
 
@@ -59,9 +57,9 @@ def _build_html(compressor_id: str, alarms: list[dict], timestamp: Optional[str]
           <table style="width:100%;border-collapse:collapse;">
             <thead>
               <tr style="border-bottom:1px solid #30363d;">
-                <th style="padding:8px 12px;text-align:left;color:#8b949e;font-size:11px;font-weight:600;text-transform:uppercase;">Severity</th>
-                <th style="padding:8px 12px;text-align:left;color:#8b949e;font-size:11px;font-weight:600;text-transform:uppercase;">Alarm</th>
-                <th style="padding:8px 12px;text-align:left;color:#8b949e;font-size:11px;font-weight:600;text-transform:uppercase;">Detail</th>
+                <th style="padding:8px 12px;text-align:left;color:#8b949e;font-size:11px;text-transform:uppercase;">Severity</th>
+                <th style="padding:8px 12px;text-align:left;color:#8b949e;font-size:11px;text-transform:uppercase;">Alarm</th>
+                <th style="padding:8px 12px;text-align:left;color:#8b949e;font-size:11px;text-transform:uppercase;">Detail</th>
               </tr>
             </thead>
             <tbody>{alarm_rows}</tbody>
@@ -74,21 +72,30 @@ def _build_html(compressor_id: str, alarms: list[dict], timestamp: Optional[str]
     </div>"""
 
 
+def _send_sync(to_emails: list[str], subject: str, html: str) -> None:
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = ALARM_EMAIL_FROM
+    msg["To"]      = ", ".join(to_emails)
+    msg.attach(MIMEText(html, "html"))
+
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.starttls()
+        server.login(ALARM_EMAIL_FROM, ALARM_EMAIL_PASSWORD)
+        server.sendmail(ALARM_EMAIL_FROM, to_emails, msg.as_string())
+
+
 async def send_alarm_email(
     compressor_id: str,
     alarms: list[dict],
     admin_emails: list[str],
     timestamp: Optional[str] = None,
 ) -> None:
-    """ส่ง alarm email — มี cooldown 10 นาทีต่อ compressor
-    ถ้าตั้ง ALARM_EMAIL_TO ไว้ใน env จะใช้นั้นเลย ไม่งั้นใช้ admin emails จาก DB
-    """
-    if not RESEND_API_KEY:
-        logger.warning("RESEND_API_KEY ไม่ได้ตั้งค่า — ข้าม email notification")
+    if not ALARM_EMAIL_FROM or not ALARM_EMAIL_PASSWORD:
+        logger.warning("ALARM_EMAIL_FROM/PASSWORD ไม่ได้ตั้งค่า — ข้าม email notification")
         return
 
     to_emails = ALARM_EMAIL_TO if ALARM_EMAIL_TO else admin_emails
-
     if not to_emails:
         logger.warning("ไม่มี email ปลายทาง — ข้าม email notification")
         return
@@ -102,12 +109,11 @@ async def send_alarm_email(
         return
 
     try:
-        resend.Emails.send({
-            "from":    ALARM_EMAIL_FROM,
-            "to":      to_emails,
-            "subject": f"🔴 CRITICAL ALARM — {compressor_id}",
-            "html":    _build_html(compressor_id, critical, timestamp),
-        })
+        subject = f"🔴 CRITICAL ALARM — {compressor_id}"
+        html    = _build_html(compressor_id, critical, timestamp)
+        await asyncio.get_event_loop().run_in_executor(
+            None, _send_sync, to_emails, subject, html
+        )
         _mark_sent(compressor_id)
         logger.info("alarm email sent for %s to %s", compressor_id, to_emails)
     except Exception as e:
