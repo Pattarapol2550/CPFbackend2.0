@@ -106,20 +106,24 @@ async def save_data(
     db.add(record)
     await db.commit()
 
-    # ส่ง email แจ้งเตือนถ้ามี Critical alarm (background task ไม่บล็อก response)
-    alarms = diag.get("alarms", []) if isinstance(diag, dict) else []
-    if any(a.get("severity") == "Critical" for a in alarms):
-        admin_result = await db.execute(
-            select(UserModel.email).where(
-                UserModel.role == "admin",
-                UserModel.is_active == True,
+    # ส่ง email แจ้งเตือนถ้ามี Critical alarm — ห่อ try/except ไม่ให้ error กระทบ response
+    try:
+        alarms = diag.get("alarms", []) if isinstance(diag, dict) else []
+        if any(a.get("severity") == "Critical" for a in alarms):
+            admin_result = await db.execute(
+                select(UserModel.email).where(
+                    UserModel.role == "admin",
+                    UserModel.is_active == True,
+                )
             )
-        )
-        admin_emails = [row[0] for row in admin_result.all() if row[0]]
-        ts = record_time.strftime("%d %b %Y %H:%M:%S")
-        asyncio.create_task(
-            send_alarm_email(payload.compressor_id, alarms, admin_emails, ts)
-        )
+            admin_emails = [row[0] for row in admin_result.all() if row[0]]
+            ts = record_time.strftime("%d %b %Y %H:%M:%S")
+            loop = asyncio.get_event_loop()
+            loop.create_task(
+                send_alarm_email(payload.compressor_id, alarms, admin_emails, ts)
+            )
+    except Exception:
+        logger.exception("alarm email task failed — ignoring")
 
     return {"status": "Success", "analysis": diag}
 

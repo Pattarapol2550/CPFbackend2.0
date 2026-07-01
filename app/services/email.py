@@ -111,9 +111,8 @@ async def send_alarm_email(
     try:
         subject = f"🔴 CRITICAL ALARM — {compressor_id}"
         html    = _build_html(compressor_id, critical, timestamp)
-        await asyncio.get_event_loop().run_in_executor(
-            None, _send_sync, to_emails, subject, html
-        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _send_sync, to_emails, subject, html)
         _mark_sent(compressor_id)
         logger.info("alarm email sent for %s to %s", compressor_id, to_emails)
     except Exception as e:
