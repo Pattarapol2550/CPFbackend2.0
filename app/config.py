@@ -37,6 +37,10 @@ AUTH_COOKIE_HTTPONLY = os.getenv("AUTH_COOKIE_HTTPONLY",  "true").lower() == "tr
 AUTH_COOKIE_PATH     = os.getenv("AUTH_COOKIE_PATH",      "/")
 AUTH_COOKIE_MAX_AGE  = int(os.getenv("AUTH_COOKIE_MAX_AGE", str(TOKEN_TTL_H * 3600)))
 
+# ── Resend (Email notification) ──────────────────────────────────────────────
+RESEND_API_KEY    = os.getenv("RESEND_API_KEY", "")
+ALARM_EMAIL_FROM  = os.getenv("ALARM_EMAIL_FROM", "onboarding@resend.dev")
+
 # ── Google OAuth ──────────────────────────────────────────────────────────────
 GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID",     "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
