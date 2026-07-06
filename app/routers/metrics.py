@@ -5,7 +5,7 @@ app/routers/metrics.py — Metrics CRUD endpoints.
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
 
@@ -129,6 +129,40 @@ async def save_data(
         logger.exception("alarm email task failed — ignoring")
 
     return {"status": "Success", "analysis": diag}
+
+
+# ── POST /api/metrics/bulk ────────────────────────────────────────────────────
+
+@router.post("/api/metrics/bulk", tags=["metrics"])
+async def bulk_import(
+    payload: List[CompressorDataInput],
+    _user: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import หลาย records พร้อมกัน — ใช้สำหรับ CSV import จาก frontend"""
+    if not payload:
+        return {"status": "Success", "imported": 0, "failed": 0}
+
+    records, failed = [], 0
+    for item in payload:
+        try:
+            diag = diagnose_compressor(item)
+            record_time = item.timestamp.astimezone(TZ_TH) if item.timestamp else datetime.now(TZ_TH)
+            records.append(MetricModel(
+                compressor_id=item.compressor_id,
+                timestamp=record_time,
+                inputs_snapshot=item.model_dump(mode="json", exclude={"timestamp", "compressor_id"}),
+                diagnosis=diag,
+            ))
+        except Exception:
+            logger.warning("bulk_import: skipped one record due to error", exc_info=True)
+            failed += 1
+
+    if records:
+        db.add_all(records)
+        await db.commit()
+
+    return {"status": "Success", "imported": len(records), "failed": failed}
 
 
 # ── GET /api/metrics/{compressor_id} ─────────────────────────────────────────

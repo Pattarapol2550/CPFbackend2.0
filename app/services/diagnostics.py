@@ -180,9 +180,10 @@ def diagnose_compressor(data: CompressorDataInput):
             t_sat_dis = CP.PropsSI("T", "P", p_dis_pa, "Q", 0, fluid) - 273.15
             subcooling = t_sat_dis - data.liquid_temp_c
 
-        if p_dis_pa and data.condenser_temp_c is not None:
+        cond_temp = data.condenser_temp_c if data.condenser_temp_c is not None else getattr(data, 'glycol_temp', None)
+        if p_dis_pa and cond_temp is not None:
             t_sat_dis2 = CP.PropsSI("T", "P", p_dis_pa, "Q", 1, fluid) - 273.15
-            approach = t_sat_dis2 - data.condenser_temp_c
+            approach = t_sat_dis2 - cond_temp
             if approach > 15:
                 alarms.append(
                     {
