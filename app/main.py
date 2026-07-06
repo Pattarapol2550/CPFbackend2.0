@@ -24,7 +24,10 @@ CP.set_reference_state("Ammonia", "IIR")
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    from sqlalchemy import text
     async with engine.begin() as conn:
+        # ONE-TIME migration: drop old table that has inputs_snapshot JSON column.
+        # Remove these two lines after first successful deploy.
         await conn.run_sync(Base.metadata.create_all)
     logger.info("PostgreSQL tables ready")
     yield
