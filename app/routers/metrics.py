@@ -8,8 +8,6 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
-
-logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -23,28 +21,57 @@ from app.services.diagnostics import diagnose_compressor
 from app.services.email import send_alarm_email
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# ── Sensor field names (same order as schema) ─────────────────────────────────
+SENSOR_FIELDS = [
+    "sp_kg", "dp_kg", "st_c", "dt_c", "liquid_temp_c", "current_amp",
+    "evaporator_room_temp_c", "condenser_temp_c", "compressor_type",
+    "glycol_temp", "glycol_level", "oil_pressure", "oil_temp",
+    "oil_filter", "oil_level", "slide_valve_pct",
+    "nh3_level", "nh3_pump",
+    "room_temp_1b", "room_temp_1c", "room_temp_2b", "room_temp_2c", "room_temp_3b",
+    "run_hour",
+]
+
+
+def _payload_to_model_kwargs(payload: CompressorDataInput) -> dict:
+    """Extract sensor fields from schema into MetricModel column kwargs."""
+    return {f: getattr(payload, f, None) for f in SENSOR_FIELDS}
+
+
+def _row_to_flat(row: MetricModel, tz_th) -> dict:
+    """Serialize one MetricModel row to a flat dict for API response."""
+    ts = row.timestamp.astimezone(tz_th).isoformat() if row.timestamp else None
+    d = {
+        "_id":          str(row.id),
+        "compressor_id": row.compressor_id,
+        "timestamp":    ts,
+        "diagnosis":    row.diagnosis,
+    }
+    for f in SENSOR_FIELDS:
+        d[f] = getattr(row, f, None)
+    return d
 
 
 def _serialize_detail_row(row: MetricModel, tz_th) -> dict:
-    """Build flat detail dict for one MetricModel row."""
-    inp     = row.inputs_snapshot or {}
-    diag    = row.diagnosis       or {}
+    diag    = row.diagnosis or {}
     enth    = diag.get("enthalpy", {})
-    systems = diag.get("systems",  {})
-    alarms  = diag.get("alarms",   [])
+    systems = diag.get("systems", {})
+    alarms  = diag.get("alarms", [])
     return {
         "id":            row.id,
         "compressor_id": row.compressor_id,
         "timestamp":     row.timestamp.astimezone(tz_th).isoformat() if row.timestamp else None,
         "input": {
-            "sp_kg":                  inp.get("sp_kg"),
-            "dp_kg":                  inp.get("dp_kg"),
-            "st_c":                   inp.get("st_c"),
-            "dt_c":                   inp.get("dt_c"),
-            "liquid_temp_c":          inp.get("liquid_temp_c"),
-            "current_amp":            inp.get("current_amp"),
-            "evaporator_room_temp_c": inp.get("evaporator_room_temp_c"),
-            "condenser_temp_c":       inp.get("condenser_temp_c"),
+            "sp_kg":                  row.sp_kg,
+            "dp_kg":                  row.dp_kg,
+            "st_c":                   row.st_c,
+            "dt_c":                   row.dt_c,
+            "liquid_temp_c":          row.liquid_temp_c,
+            "current_amp":            row.current_amp,
+            "evaporator_room_temp_c": row.evaporator_room_temp_c,
+            "condenser_temp_c":       row.condenser_temp_c,
         },
         "performance": {
             "power_kw":       diag.get("power_kw"),
@@ -99,17 +126,12 @@ async def save_data(
     record = MetricModel(
         compressor_id=payload.compressor_id,
         timestamp=record_time,
-        # FIX: exclude timestamp และ compressor_id ออก — มีใน column แล้ว
-        inputs_snapshot=payload.model_dump(
-            mode="json",
-            exclude={"timestamp", "compressor_id"},
-        ),
         diagnosis=diag,
+        **_payload_to_model_kwargs(payload),
     )
     db.add(record)
     await db.commit()
 
-    # ส่ง email แจ้งเตือนถ้ามี Critical alarm — ห่อ try/except ไม่ให้ error กระทบ response
     try:
         alarms = diag.get("alarms", []) if isinstance(diag, dict) else []
         if any(a.get("severity") == "Critical" for a in alarms):
@@ -139,7 +161,6 @@ async def bulk_import(
     _user: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Import หลาย records พร้อมกัน — ใช้สำหรับ CSV import จาก frontend"""
     if not payload:
         return {"status": "Success", "imported": 0, "failed": 0}
 
@@ -151,8 +172,8 @@ async def bulk_import(
             records.append(MetricModel(
                 compressor_id=item.compressor_id,
                 timestamp=record_time,
-                inputs_snapshot=item.model_dump(mode="json", exclude={"timestamp", "compressor_id"}),
                 diagnosis=diag,
+                **_payload_to_model_kwargs(item),
             ))
         except Exception:
             logger.warning("bulk_import: skipped one record due to error", exc_info=True)
@@ -170,7 +191,7 @@ async def bulk_import(
 @router.get("/api/metrics/{compressor_id}", tags=["metrics"])
 async def get_dashboard_data(
     compressor_id: str,
-    limit: int = Query(default=2000, ge=1, le=10_000, description="จำนวน records สูงสุด 10,000"),
+    limit: int = Query(default=2000, ge=1, le=10_000),
     start: Optional[datetime] = None,
     end:   Optional[datetime] = None,
     _user: dict = Depends(require_user),
@@ -184,16 +205,7 @@ async def get_dashboard_data(
     query = query.order_by(MetricModel.timestamp.desc()).limit(limit)
 
     rows = (await db.execute(query)).scalars().all()
-    return [
-        {
-            "_id":             str(row.id),
-            "compressor_id":   row.compressor_id,
-            "timestamp":       row.timestamp.astimezone(TZ_TH).isoformat() if row.timestamp else None,
-            "inputs_snapshot": row.inputs_snapshot,
-            "diagnosis":       row.diagnosis,
-        }
-        for row in rows
-    ]
+    return [_row_to_flat(row, TZ_TH) for row in rows]
 
 
 # ── GET /api/metrics/{compressor_id}/detail ───────────────────────────────────

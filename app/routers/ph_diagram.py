@@ -74,7 +74,15 @@ async def get_ph_diagram(
             status.HTTP_404_NOT_FOUND, detail=f"ไม่พบข้อมูลของ {compressor_id}"
         )
 
-    inputs = doc.inputs_snapshot or {}
+    inputs = {
+        "sp_kg": doc.sp_kg, "dp_kg": doc.dp_kg,
+        "st_c": doc.st_c,   "dt_c": doc.dt_c,
+        "liquid_temp_c": doc.liquid_temp_c,
+        "current_amp": doc.current_amp,
+        "evaporator_room_temp_c": doc.evaporator_room_temp_c,
+        "condenser_temp_c": doc.condenser_temp_c,
+        "compressor_type": doc.compressor_type,
+    }
     cycle = compute_cycle_points(inputs)
     dome = build_saturation_dome()
     ts_str = doc.timestamp.astimezone(TZ_TH).isoformat() if doc.timestamp else None
