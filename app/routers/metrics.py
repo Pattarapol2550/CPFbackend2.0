@@ -14,6 +14,7 @@ from sqlalchemy.future import select
 from app.core.constants import TZ_TH
 from app.core.security import require_user
 from app.database import get_db
+from app.models.compressor import CompressorModel
 from app.models.metric import MetricModel
 from app.models.user import UserModel
 from app.schemas.metrics import CompressorDataInput
@@ -123,6 +124,19 @@ async def save_data(
     record_time = (
         payload.timestamp.astimezone(TZ_TH) if payload.timestamp else datetime.now(TZ_TH)
     )
+
+    # สร้าง compressor ถ้ายังไม่มี (manual input อาจเพิ่ม compressor ใหม่)
+    existing = await db.execute(
+        select(CompressorModel).where(CompressorModel.id == payload.compressor_id)
+    )
+    if not existing.scalars().first():
+        new_comp = CompressorModel(
+            id=payload.compressor_id,
+            type=payload.compressor_type or "single"
+        )
+        db.add(new_comp)
+        await db.flush()  # flush to ensure ID is available before commit
+
     record = MetricModel(
         compressor_id=payload.compressor_id,
         timestamp=record_time,
@@ -163,6 +177,22 @@ async def bulk_import(
 ):
     if not payload:
         return {"status": "Success", "imported": 0, "failed": 0}
+
+    # สร้าง compressor ใหม่สำหรับ ID ที่ยังไม่มีอยู่
+    comp_ids = set(item.compressor_id for item in payload)
+    existing_result = await db.execute(
+        select(CompressorModel.id).where(CompressorModel.id.in_(list(comp_ids)))
+    )
+    existing_ids = {row[0] for row in existing_result.all()}
+    missing_ids = comp_ids - existing_ids
+
+    for comp_id in missing_ids:
+        # หาประเภทคอมเพรสเซอร์จาก payload
+        comp_type = next((item.compressor_type for item in payload if item.compressor_id == comp_id), "single")
+        new_comp = CompressorModel(id=comp_id, type=comp_type or "single")
+        db.add(new_comp)
+    if missing_ids:
+        await db.flush()
 
     records, failed = [], 0
     for item in payload:
