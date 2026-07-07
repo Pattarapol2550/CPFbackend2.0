@@ -106,6 +106,44 @@ class UpdateProfileIn(BaseModel):
         return v
 
 
+# ── Compressor registry (admin) ───────────────────────────────────────────────
+
+COMPRESSOR_TYPES = ("booster", "high_stage", "single")
+
+
+class CompressorIn(BaseModel):
+    """สร้างคอมเพรสเซอร์ใหม่"""
+    id:   str
+    type: str
+
+    @field_validator("id")
+    @classmethod
+    def check_id(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not re.match(r"^[A-Z0-9_-]{2,20}$", v):
+            raise ValueError("รหัสคอมเพรสเซอร์ต้องยาว 2-20 ตัว ใช้ได้เฉพาะ A-Z, 0-9, _ และ -")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def check_type(cls, v: str) -> str:
+        if v not in COMPRESSOR_TYPES:
+            raise ValueError(f"type ต้องเป็นหนึ่งใน {COMPRESSOR_TYPES}")
+        return v
+
+
+class CompressorUpdateIn(BaseModel):
+    """แก้ไขรูปแบบคอมเพรสเซอร์"""
+    type: str
+
+    @field_validator("type")
+    @classmethod
+    def check_type(cls, v: str) -> str:
+        if v not in COMPRESSOR_TYPES:
+            raise ValueError(f"type ต้องเป็นหนึ่งใน {COMPRESSOR_TYPES}")
+        return v
+
+
 class ChangePasswordIn(BaseModel):
     """เปลี่ยนรหัสผ่าน"""
     current_password: str

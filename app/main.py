@@ -12,24 +12,57 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
 from app.config import CORS_ORIGINS
 from app.core.limiter import limiter          # ← import จากไฟล์กลาง
-from app.database import Base, engine
+from app.database import AsyncSessionLocal, Base, engine
+from app.models.compressor import CompressorModel
 from app.routers import auth, calculator, metrics, ph_diagram
 
 logger = logging.getLogger(__name__)
 
 CP.set_reference_state("Ammonia", "IIR")
 
+# Compressor ที่มีอยู่จริงในโรงงาน — ใช้ seed ตาราง compressors ครั้งแรกที่ตารางว่าง
+# (เดิม hardcode อยู่ฝั่ง frontend utils/format.js เท่านั้น)
+_SEED_COMPRESSORS = {
+    "COMP-01": "high_stage",
+    "COMP-02": "booster",
+    "COMP-03": "booster",
+    "COMP-04": "booster",
+    "COMP-05": "booster",
+    "COMP-06": "high_stage",
+    "COMP-07": "high_stage",
+}
+
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    from sqlalchemy import text
     async with engine.begin() as conn:
         # ONE-TIME migration: drop old table that has inputs_snapshot JSON column.
         # Remove these two lines after first successful deploy.
         await conn.run_sync(Base.metadata.create_all)
     logger.info("PostgreSQL tables ready")
+
+    # ONE-TIME seed: เติม compressors ตารางใหม่ด้วยรายชื่อที่ใช้งานจริงอยู่แล้ว
+    # (ถ้าเคย seed หรือ admin สร้างเองแล้ว ตารางจะไม่ว่าง จะข้ามขั้นตอนนี้)
+    # ห่อ try/except กันไม่ให้ seed พังแล้วดึง startup ทั้งแอปล้มไปด้วย
+    try:
+        async with AsyncSessionLocal() as session:
+            existing = (await session.execute(select(CompressorModel.id))).scalars().all()
+            if not existing:
+                session.add_all([
+                    CompressorModel(id=cid, type=ctype, created_at=datetime.now(timezone.utc))
+                    for cid, ctype in _SEED_COMPRESSORS.items()
+                ])
+                await session.commit()
+                logger.info("Seeded %d compressors", len(_SEED_COMPRESSORS))
+    except Exception:
+        logger.exception("Compressor seed failed — continuing startup without seed data")
+
     yield
 
 

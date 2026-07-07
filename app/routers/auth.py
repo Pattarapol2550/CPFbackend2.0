@@ -26,10 +26,13 @@ from app.core.security import (
     verify_password,
 )
 from app.database import get_db
+from app.models.compressor import CompressorModel
 from app.models.user import UserModel
 from app.schemas.auth import (
     AdminCreateUserIn,
     ChangePasswordIn,
+    CompressorIn,
+    CompressorUpdateIn,
     GoogleCallbackIn,
     LoginIn,
     RegisterIn,
@@ -278,6 +281,17 @@ async def get_me(current: dict = Depends(require_user)):
     return {"username": current["username"], "role": current.get("role", "user")}
 
 
+# ── GET /api/compressors — list for all logged-in users (dropdowns, ฯลฯ) ──────
+
+@router.get("/api/compressors", tags=["compressors"])
+async def list_compressors(
+    _user: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(CompressorModel).order_by(CompressorModel.id))
+    return [{"id": c.id, "type": c.type} for c in result.scalars().all()]
+
+
 # ── Profile ───────────────────────────────────────────────────────────────────
 
 @router.get("/api/auth/profile", tags=["profile"])
@@ -421,3 +435,64 @@ async def admin_delete_user(
     await db.commit()
     audit.info("USER_DELETE admin=%s target=%s", current_admin.get("username"), user.username)
     return {"ok": True, "message": f"ลบ user '{user.username}' สำเร็จ"}
+
+
+# ── Admin · Compressors ───────────────────────────────────────────────────────
+
+@router.get("/api/auth/admin/compressors", tags=["admin"])
+async def admin_list_compressors(
+    _admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(CompressorModel).order_by(CompressorModel.id))
+    return [
+        {"id": c.id, "type": c.type, "created_at": c.created_at.isoformat() if c.created_at else None}
+        for c in result.scalars().all()
+    ]
+
+
+@router.post("/api/auth/admin/compressors", status_code=201, tags=["admin"])
+async def admin_create_compressor(
+    body: CompressorIn,
+    current_admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    existing = await db.get(CompressorModel, body.id)
+    if existing:
+        raise HTTPException(409, detail=f"คอมเพรสเซอร์ '{body.id}' มีอยู่แล้ว")
+    comp = CompressorModel(id=body.id, type=body.type, created_at=datetime.now(timezone.utc))
+    db.add(comp)
+    await db.commit()
+    audit.info("COMPRESSOR_CREATE admin=%s id=%s type=%s", current_admin.get("username"), comp.id, comp.type)
+    return {"ok": True, "id": comp.id, "type": comp.type}
+
+
+@router.patch("/api/auth/admin/compressors/{compressor_id}", tags=["admin"])
+async def admin_update_compressor(
+    compressor_id: str,
+    body: CompressorUpdateIn,
+    current_admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    comp = await db.get(CompressorModel, compressor_id.strip().upper())
+    if not comp:
+        raise HTTPException(404, detail=f"ไม่พบคอมเพรสเซอร์ '{compressor_id}'")
+    comp.type = body.type
+    await db.commit()
+    audit.info("COMPRESSOR_UPDATE admin=%s id=%s type=%s", current_admin.get("username"), comp.id, comp.type)
+    return {"ok": True, "id": comp.id, "type": comp.type}
+
+
+@router.delete("/api/auth/admin/compressors/{compressor_id}", tags=["admin"])
+async def admin_delete_compressor(
+    compressor_id: str,
+    current_admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    comp = await db.get(CompressorModel, compressor_id.strip().upper())
+    if not comp:
+        raise HTTPException(404, detail=f"ไม่พบคอมเพรสเซอร์ '{compressor_id}'")
+    await db.delete(comp)
+    await db.commit()
+    audit.info("COMPRESSOR_DELETE admin=%s id=%s", current_admin.get("username"), comp.id)
+    return {"ok": True, "message": f"ลบ '{comp.id}' สำเร็จ"}
