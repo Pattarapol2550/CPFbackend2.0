@@ -58,6 +58,7 @@ def _verify_google_id_token(token: str) -> dict:
             audience=GOOGLE_CLIENT_ID,
         )
     except Exception as exc:
+        audit.warning("GOOGLE_IDTOKEN_FAIL reason=%s", repr(exc))
         raise HTTPException(401, detail="Google token ไม่ถูกต้องหรือหมดอายุ") from exc
 
 
@@ -229,12 +230,13 @@ async def google_callback(
         )
 
     if token_res.status_code != 200:
-        audit.warning("GOOGLE_TOKEN_FAIL ip=%s status=%s",
-                      request.client.host, token_res.status_code)
+        audit.warning("GOOGLE_TOKEN_FAIL ip=%s status=%s redirect_uri=%s body=%s",
+                      request.client.host, token_res.status_code, body.redirect_uri, token_res.text)
         raise HTTPException(401, detail="Google authentication ล้มเหลว กรุณาลองใหม่")
 
     id_token_str = token_res.json().get("id_token", "")
     if not id_token_str:
+        audit.warning("GOOGLE_NO_IDTOKEN ip=%s body=%s", request.client.host, token_res.text)
         raise HTTPException(401, detail="Google ไม่ส่ง token กลับมา")
 
     info = _verify_google_id_token(id_token_str)
@@ -244,6 +246,7 @@ async def google_callback(
     name      = info.get("name", "")
 
     if not email or not google_id:
+        audit.warning("GOOGLE_NO_EMAIL ip=%s claims=%s", request.client.host, info)
         raise HTTPException(401, detail="Google token ไม่มีข้อมูล email")
 
     user = await _find_or_create_google_user(
