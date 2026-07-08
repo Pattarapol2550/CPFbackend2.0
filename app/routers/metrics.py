@@ -195,6 +195,7 @@ async def bulk_import(
         await db.flush()
 
     records, failed = [], 0
+    critical_by_comp = {}
     for item in payload:
         try:
             diag = diagnose_compressor(item)
@@ -205,6 +206,12 @@ async def bulk_import(
                 diagnosis=diag,
                 **_payload_to_model_kwargs(item),
             ))
+            alarms = diag.get("alarms", []) if isinstance(diag, dict) else []
+            if any(a.get("severity") == "Critical" for a in alarms):
+                # เก็บ record ล่าสุดต่อ compressor ไว้ยิงอีเมลทีเดียวหลัง commit
+                if (item.compressor_id not in critical_by_comp
+                        or record_time > critical_by_comp[item.compressor_id][1]):
+                    critical_by_comp[item.compressor_id] = (alarms, record_time)
         except Exception:
             logger.warning("bulk_import: skipped one record due to error", exc_info=True)
             failed += 1
@@ -212,6 +219,24 @@ async def bulk_import(
     if records:
         db.add_all(records)
         await db.commit()
+
+    if critical_by_comp:
+        try:
+            admin_result = await db.execute(
+                select(UserModel.email).where(
+                    UserModel.role == "admin",
+                    UserModel.is_active == True,
+                )
+            )
+            admin_emails = [row[0] for row in admin_result.all() if row[0]]
+            loop = asyncio.get_event_loop()
+            for comp_id, (alarms, record_time) in critical_by_comp.items():
+                ts = record_time.strftime("%d %b %Y %H:%M:%S")
+                loop.create_task(
+                    send_alarm_email(comp_id, alarms, admin_emails, ts)
+                )
+        except Exception:
+            logger.exception("bulk_import: alarm email task failed — ignoring")
 
     return {"status": "Success", "imported": len(records), "failed": failed}
 
