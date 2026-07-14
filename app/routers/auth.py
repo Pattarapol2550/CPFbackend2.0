@@ -59,6 +59,7 @@ def _verify_google_id_token(token: str) -> dict:
             token,
             google_requests.Request(),
             audience=GOOGLE_CLIENT_ID,
+            clock_skew_in_seconds=10,
         )
     except Exception as exc:
         audit.warning("GOOGLE_IDTOKEN_FAIL reason=%s", repr(exc))
