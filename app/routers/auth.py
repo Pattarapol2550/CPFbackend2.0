@@ -26,7 +26,7 @@ from app.core.security import (
     verify_password,
 )
 from app.database import get_db
-from app.models.compressor import CompressorModel
+from app.models.compressor import CompressorModel, normalize_compressor_id
 from app.models.user import UserModel
 from app.schemas.auth import (
     AdminCreateUserIn,
@@ -458,10 +458,11 @@ async def admin_create_compressor(
     current_admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    existing = await db.get(CompressorModel, body.id)
+    norm_id = normalize_compressor_id(body.id)
+    existing = await db.get(CompressorModel, norm_id)
     if existing:
-        raise HTTPException(409, detail=f"คอมเพรสเซอร์ '{body.id}' มีอยู่แล้ว")
-    comp = CompressorModel(id=body.id, type=body.type, created_at=datetime.now(timezone.utc))
+        raise HTTPException(409, detail=f"คอมเพรสเซอร์ '{norm_id}' มีอยู่แล้ว")
+    comp = CompressorModel(id=norm_id, type=body.type, created_at=datetime.now(timezone.utc))
     db.add(comp)
     await db.commit()
     audit.info("COMPRESSOR_CREATE admin=%s id=%s type=%s", current_admin.get("username"), comp.id, comp.type)
@@ -475,7 +476,7 @@ async def admin_update_compressor(
     current_admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    comp = await db.get(CompressorModel, compressor_id.strip().upper())
+    comp = await db.get(CompressorModel, normalize_compressor_id(compressor_id))
     if not comp:
         raise HTTPException(404, detail=f"ไม่พบคอมเพรสเซอร์ '{compressor_id}'")
     comp.type = body.type
@@ -490,7 +491,7 @@ async def admin_delete_compressor(
     current_admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    comp = await db.get(CompressorModel, compressor_id.strip().upper())
+    comp = await db.get(CompressorModel, normalize_compressor_id(compressor_id))
     if not comp:
         raise HTTPException(404, detail=f"ไม่พบคอมเพรสเซอร์ '{compressor_id}'")
     await db.delete(comp)

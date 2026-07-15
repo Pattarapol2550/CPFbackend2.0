@@ -14,7 +14,7 @@ from sqlalchemy.future import select
 from app.core.constants import TZ_TH
 from app.core.security import require_user
 from app.database import get_db
-from app.models.compressor import CompressorModel
+from app.models.compressor import CompressorModel, normalize_compressor_id
 from app.models.metric import MetricModel
 from app.models.user import UserModel
 from app.schemas.metrics import CompressorDataInput
@@ -120,6 +120,7 @@ async def save_data(
     _user: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    payload.compressor_id = normalize_compressor_id(payload.compressor_id)
     diag = diagnose_compressor(payload)
     record_time = (
         payload.timestamp.astimezone(TZ_TH) if payload.timestamp else datetime.now(TZ_TH)
@@ -177,6 +178,9 @@ async def bulk_import(
 ):
     if not payload:
         return {"status": "Success", "imported": 0, "failed": 0}
+
+    for item in payload:
+        item.compressor_id = normalize_compressor_id(item.compressor_id)
 
     # สร้าง compressor ใหม่สำหรับ ID ที่ยังไม่มีอยู่
     comp_ids = set(item.compressor_id for item in payload)
